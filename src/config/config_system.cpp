@@ -116,6 +116,14 @@ bool ConfigSystem::LoadFromFile(const std::string& configPath) {
                 else if (key == "infiniteMP") m_config.cheats.infiniteMP = (val == "true" || val == "1");
                 else if (key == "expMultiplier") m_config.cheats.expMultiplier = std::stof(val);
                 else if (key == "targetLevel") m_config.cheats.targetLevel = std::stoi(val);
+            } else if (currentSection == "Handheld") {
+                if (key == "enabled") m_config.handheld.enabled = (val == "true" || val == "1");
+                else if (key == "viewMode") m_config.handheld.viewMode = static_cast<HandheldViewMode>(std::clamp(std::stoi(val), 0, 2));
+                else if (key == "scaling") m_config.handheld.scaling = static_cast<HandheldScaling>(std::clamp(std::stoi(val), 0, 2));
+                else if (key == "hideOriginalHud") m_config.handheld.hideOriginalHud = (val == "true" || val == "1");
+                else if (key == "swapScreens") m_config.handheld.swapScreens = (val == "true" || val == "1");
+                else if (key == "mapZoom") m_config.handheld.mapZoom = std::clamp(std::stoi(val), 0, 1);
+                else if (key == "showFps") m_config.handheld.showFps = (val == "true" || val == "1");
             } else if (currentSection == "Rewind") {
                 if (key == "enableRewind") m_config.rewind.enableRewind = (val == "true" || val == "1");
                 else if (key == "bufferDurationSeconds") m_config.rewind.bufferDurationSeconds = std::stoi(val);
@@ -191,7 +199,16 @@ bool ConfigSystem::SaveToFile(const std::string& configPath) const {
 
     file << "[Rewind]\n";
     file << "enableRewind = " << (m_config.rewind.enableRewind ? "true" : "false") << "\n";
-    file << "bufferDurationSeconds = " << m_config.rewind.bufferDurationSeconds << "\n";
+    file << "bufferDurationSeconds = " << m_config.rewind.bufferDurationSeconds << "\n\n";
+
+    file << "[Handheld]\n";
+    file << "enabled = " << (m_config.handheld.enabled ? "true" : "false") << "\n";
+    file << "viewMode = " << static_cast<int>(m_config.handheld.viewMode) << "\n";
+    file << "scaling = " << static_cast<int>(m_config.handheld.scaling) << "\n";
+    file << "hideOriginalHud = " << (m_config.handheld.hideOriginalHud ? "true" : "false") << "\n";
+    file << "swapScreens = " << (m_config.handheld.swapScreens ? "true" : "false") << "\n";
+    file << "mapZoom = " << m_config.handheld.mapZoom << "\n";
+    file << "showFps = " << (m_config.handheld.showFps ? "true" : "false") << "\n";
 
     return true;
 }

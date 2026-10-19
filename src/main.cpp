@@ -24,12 +24,18 @@
 #include "graphics/display_filters.hpp"
 #include "graphics/hd_ui_system.hpp"
 #include "graphics/hd_background_system.hpp"
+#include "graphics/handheld_view.hpp"
+#if defined(GBARECOMP_RUNTIME_UI)
+#include "handheld/handheld_ui.hpp"
+#endif
 
 // PPU widescreen-margin pillarbox policy & tilemap provider
 extern "C" int g_ws_pillarbox;
 extern "C" int g_ws_pillarbox_left;
 extern "C" int g_ws_pillarbox_right;
 extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y, uint16_t* out_entry);
+extern "C" int (*g_ws_bg_entry_filter)(int bg, unsigned tile_x, unsigned tile_y, uint16_t entry);
+extern "C" int (*g_ws_obj_filter)(int oam_index, uint16_t attr0, uint16_t attr1, uint16_t attr2);
 
 static std::vector<uint8_t> g_romBuffer;
 static uint64_t g_currentFrameCount = 0;
@@ -38,8 +44,21 @@ static size_t g_activeEwramSize = 0;
 static uint16_t g_savedPlayerLuck = 0;
 static bool g_luckTemporarilyModified = false;
 
+// Dual-screen handheld presentation (--handheld / [Handheld] enabled).
+static bool g_handheldMode = false;
+
 extern "C" int AriaTilemapProviderCallback(int bg, int hw_x, int screen_y, uint16_t* out_entry) {
+    if (g_handheldMode)
+        return aria::graphics::HandheldView::Get().ProvideTilemapEntry(bg, hw_x, screen_y, out_entry);
     return aria::graphics::AdaptiveWidescreen::Get().ProvideTilemapEntry(bg, hw_x, screen_y, out_entry);
+}
+
+extern "C" int AriaBgEntryFilterCallback(int bg, unsigned tile_x, unsigned tile_y, uint16_t entry) {
+    return aria::graphics::HandheldView::Get().FilterBgEntry(bg, tile_x, tile_y, entry);
+}
+
+extern "C" int AriaObjFilterCallback(int oam_index, uint16_t attr0, uint16_t attr1, uint16_t attr2) {
+    return aria::graphics::HandheldView::Get().FilterObj(oam_index, attr0, attr1, attr2);
 }
 
 void AriaFramebufferPostProcess(std::uint8_t* rgb, int width, int height) {
@@ -55,6 +74,10 @@ namespace {
 constexpr int kView16x9Width = 284;
 
 void AriaExtendedViewFrame(const gbarecomp::ExtendedViewFrameInfo* frame) {
+    if (g_handheldMode) {
+        aria::graphics::HandheldView::Get().UpdateFrame(frame, g_activeEwram, g_activeEwramSize);
+        return;
+    }
     const auto& gfx = aria::config::ConfigSystem::Get().GetConfig().graphics;
     if (gfx.adaptiveWidescreen) {
         aria::graphics::AdaptiveWidescreen::Get().UpdateFrame(frame, g_activeEwram, g_activeEwramSize);
@@ -212,6 +235,12 @@ void AriaEwramFrameWrite(std::uint8_t* ewram, std::size_t ewramSize) {
 
 #if defined(GBARECOMP_RUNTIME_UI)
 void AriaImGuiOverlayRender() {
+    if (g_handheldMode) {
+        // Nothing is drawn over the game panel; everything lives on the
+        // second screen.
+        aria::handheld::RenderAuxScreen(g_activeEwram, g_activeEwramSize, g_currentFrameCount);
+        return;
+    }
     auto& qol = aria::gameplay::QolSystem::Get();
     ImGuiIO& io = ImGui::GetIO();
     float displayW = io.DisplaySize.x;
@@ -701,7 +730,9 @@ int main(int argc, char* argv[]) {
     bool romSpecifiedViaCli = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--rom" && i + 1 < argc) {
+        if (arg == "--handheld") {
+            configSystem.GetConfig().handheld.enabled = true;
+        } else if (arg == "--rom" && i + 1 < argc) {
             romPath = argv[++i];
             romSpecifiedViaCli = true;
         } else if (arg == "--bios" && i + 1 < argc) {
@@ -889,6 +920,46 @@ int main(int argc, char* argv[]) {
     g_ws_tilemap_provider = &AriaTilemapProviderCallback;
     g_runtime_fn_entry_hook = AriaFunctionEntryHook;
 
+    // Dual-screen handheld (ROCKNIX / RG DS Plus): a 4:3 game frame on one
+    // panel, map + status + menu on the other.
+    const auto& handheld = configSystem.GetConfig().handheld;
+    g_handheldMode = handheld.enabled;
+    int handheldViewW = 240;
+    int handheldViewH = 160;
+    if (g_handheldMode) {
+        switch (handheld.viewMode) {
+            case aria::config::HandheldViewMode::Extended_240x180:
+                handheldViewW = 240; handheldViewH = 180; break;
+            case aria::config::HandheldViewMode::Extended_256x192:
+                handheldViewW = 256; handheldViewH = 192; break;
+            case aria::config::HandheldViewMode::Original_240x160:
+                handheldViewW = 240; handheldViewH = 160; break;
+        }
+        opts.max_view_width = static_cast<uint16_t>(handheldViewW);
+        opts.widescreen_view_width = static_cast<uint16_t>(handheldViewW);
+        opts.max_view_height = static_cast<uint16_t>(handheldViewH);
+        aria::graphics::HandheldView::Get().SetRomData(g_romBuffer.data(), g_romBuffer.size());
+#if defined(GBARECOMP_RUNTIME_UI)
+        aria::handheld::SetRomData(g_romBuffer.data(), g_romBuffer.size());
+        aria::handheld::ApplyConfig();
+#endif
+        g_ws_bg_entry_filter = &AriaBgEntryFilterCallback;
+        g_ws_obj_filter = &AriaObjFilterCallback;
+        // A real TrueType face for the second screen, if the package ships one.
+        const std::filesystem::path font = exeDir / "fonts" / "DejaVuSans.ttf";
+        if (std::filesystem::exists(font) && !std::getenv("GBARECOMP_UI_FONT")) {
+#if defined(_WIN32)
+            _putenv_s("GBARECOMP_UI_FONT", font.string().c_str());
+            if (!std::getenv("GBARECOMP_UI_FONT_PX")) _putenv_s("GBARECOMP_UI_FONT_PX", "26");
+#else
+            setenv("GBARECOMP_UI_FONT", font.string().c_str(), 1);
+            setenv("GBARECOMP_UI_FONT_PX", "26", 0);
+#endif
+        }
+        std::cout << "[INFO] Handheld dual-screen mode: game view "
+                  << handheldViewW << "x" << handheldViewH << "\n";
+    }
+
     opts.extended_view_frame = AriaExtendedViewFrame;
     opts.ewram_frame_write = AriaEwramFrameWrite;
     opts.custom_tcp_cmd = AriaCustomTcpCommand;
@@ -922,12 +993,20 @@ int main(int argc, char* argv[]) {
     args.push_back("--bios-hle");
     args.push_back("--bios-skip-intro");
 
-    if (configSystem.GetConfig().display.fullscreen) {
-        args.push_back("--fullscreen");
-    }
-    if (configSystem.GetConfig().display.aspectRatio == aria::config::AspectRatioMode::Widescreen_16_9) {
+    if (g_handheldMode) {
+        // The window spans both panels; the compositor places it.
         args.push_back("--view-width");
-        args.push_back(std::to_string(kView16x9Width));
+        args.push_back(std::to_string(handheldViewW));
+        args.push_back("--view-height");
+        args.push_back(std::to_string(handheldViewH));
+    } else {
+        if (configSystem.GetConfig().display.fullscreen) {
+            args.push_back("--fullscreen");
+        }
+        if (configSystem.GetConfig().display.aspectRatio == aria::config::AspectRatioMode::Widescreen_16_9) {
+            args.push_back("--view-width");
+            args.push_back(std::to_string(kView16x9Width));
+        }
     }
 
     // Pass through any other command line flags (e.g. --frames, --no-window, --scale, --bios-hle)
@@ -937,6 +1016,7 @@ int main(int argc, char* argv[]) {
             ++i; // skip argument value
             continue;
         }
+        if (arg == "--handheld") continue;
         if (arg == romPath || arg == biosPath) continue;
         args.push_back(arg);
     }

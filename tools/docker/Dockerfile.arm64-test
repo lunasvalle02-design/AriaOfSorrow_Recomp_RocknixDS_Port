@@ -1,0 +1,4 @@
+# Minimal arm64 userland to smoke-test the ROCKNIX binary under emulation.
+FROM --platform=linux/arm64 debian:bookworm-slim
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libsdl2-2.0-0 libgles2 && rm -rf /var/lib/apt/lists/*

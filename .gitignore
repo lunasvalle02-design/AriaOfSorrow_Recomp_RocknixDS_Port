@@ -85,3 +85,16 @@ recomp_master_misses_*.toml.frag
 __pycache__/
 recomp_cache*/
 recomp_out/
+
+# Vendored engine trees (gbarecomp, recomp-ui) are tracked exactly as they
+# ship: their CMake modules, BIOS *configs* and test fixtures must not fall to
+# the generic rules above. (They contain no BIOS images and no ROM data.)
+!third_party/gbarecomp/**
+!third_party/recomp-ui/**
+# This port's own CMake toolchain files.
+!/cmake/
+!/cmake/*.cmake
+
+# Local test captures, packaged builds and the user's ROM copy.
+/out/
+/rom/

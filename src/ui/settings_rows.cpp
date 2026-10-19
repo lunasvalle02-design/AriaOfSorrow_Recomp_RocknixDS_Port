@@ -7,6 +7,7 @@
 #include "gameplay/cheat_system.hpp"
 #include "gameplay/grant_system.hpp"
 #include "gameplay/qol_system.hpp"
+#include "handheld/handheld_ui.hpp"
 
 #include "recomp_runtime_ui.h"
 
@@ -26,6 +27,7 @@ void PushConfigToSystems() {
     auto& cfg = aria::config::ConfigSystem::Get().GetConfig();
     aria::gameplay::CheatSystem::Get().SetConfig(cfg.cheats);
     aria::gameplay::QolSystem::Get().SetConfig(cfg.gameplay);
+    aria::handheld::ApplyConfig();
 }
 
 void SaveConfig() {
@@ -73,6 +75,15 @@ constexpr const char* kKeyGraphicsHdBackground      = "graphics.hd_background";
 constexpr const char* kKeyGraphicsHdFonts            = "graphics.hd_fonts";
 constexpr const char* kKeyGraphicsHdDialogue         = "graphics.hd_dialogue";
 
+// Dual-screen handheld (only listed when the port runs in handheld mode).
+constexpr const char* kKeyHandheldScaling = "handheld.scaling";
+constexpr const char* kKeyHandheldView    = "handheld.view_mode";
+constexpr const char* kKeyHandheldHud     = "handheld.hide_hud";
+constexpr const char* kKeyHandheldSwap    = "handheld.swap_screens";
+
+const char* const kHandheldScalingChoices[] = {"Suavizado", "Sin filtro", "Entero 4x"};
+const char* const kHandheldViewChoices[] = {"4:3 240x180", "4:3 256x192", "Original 3:2"};
+
 const char* const kDisplayFilterChoices[] = {
     "None",
     "GBA LCD Grid",
@@ -82,6 +93,28 @@ const char* const kDisplayFilterChoices[] = {
 };
 
 const RecompRuntimeUiItem kItems[] = {
+    {
+        kKeyHandheldScaling, "Pantalla dual", "Escalado",
+        "Suavizado: escala entera + filtro leve para disimular los píxeles "
+        "desiguales en 1024x768. Sin filtro: vecino más próximo.",
+        RECOMP_RUNTIME_UI_CHOICE, 0, 2, 1, kHandheldScalingChoices, 3, nullptr,
+    },
+    {
+        kKeyHandheldView, "Pantalla dual", "Formato (requiere reinicio)",
+        "4:3 muestra escenario y enemigos reales por encima y por debajo de "
+        "la vista original.",
+        RECOMP_RUNTIME_UI_CHOICE, 0, 2, 1, kHandheldViewChoices, 3, nullptr,
+    },
+    {
+        kKeyHandheldHud, "Pantalla dual", "Ocultar HUD original",
+        "La vida y la magia se muestran en la pantalla inferior.",
+        RECOMP_RUNTIME_UI_BOOL, 0, 0, 0, nullptr, 0, nullptr,
+    },
+    {
+        kKeyHandheldSwap, "Pantalla dual", "Juego en la pantalla inferior",
+        "Intercambia las dos pantallas.",
+        RECOMP_RUNTIME_UI_BOOL, 0, 0, 0, nullptr, 0, nullptr,
+    },
     {
         kKeyCheatsEnable, "Cheats", "Enable cheats",
         "Master switch for the cheats below.",
@@ -240,11 +273,41 @@ const RecompRuntimeUiItem kItems[] = {
 
 void SetConfigSavePath(std::string path) { ConfigSavePath() = std::move(path); }
 
-const void* AriaSettingsItems() { return kItems; }
-std::size_t AriaSettingsItemCount() { return sizeof(kItems) / sizeof(kItems[0]); }
+void SaveConfigNow() { SaveConfig(); }
+
+// The handheld rows lead the table; desktop builds skip them.
+constexpr std::size_t kHandheldItemCount = 4;
+
+const void* AriaSettingsItems() {
+    return aria::config::ConfigSystem::Get().GetConfig().handheld.enabled
+        ? kItems : kItems + kHandheldItemCount;
+}
+
+std::size_t AriaSettingsItemCount() {
+    const std::size_t all = sizeof(kItems) / sizeof(kItems[0]);
+    return aria::config::ConfigSystem::Get().GetConfig().handheld.enabled
+        ? all : all - kHandheldItemCount;
+}
 
 int AriaUiGet(const char* key, int* valueOut) {
     if (!key || !valueOut) return 0;
+    const auto& hh = aria::config::ConfigSystem::Get().GetConfig().handheld;
+    if (std::strcmp(key, kKeyHandheldScaling) == 0) {
+        *valueOut = static_cast<int>(hh.scaling);
+        return 1;
+    }
+    if (std::strcmp(key, kKeyHandheldView) == 0) {
+        *valueOut = static_cast<int>(hh.viewMode);
+        return 1;
+    }
+    if (std::strcmp(key, kKeyHandheldHud) == 0) {
+        *valueOut = hh.hideOriginalHud ? 1 : 0;
+        return 1;
+    }
+    if (std::strcmp(key, kKeyHandheldSwap) == 0) {
+        *valueOut = hh.swapScreens ? 1 : 0;
+        return 1;
+    }
     const auto& cheats = aria::config::ConfigSystem::Get().GetConfig().cheats;
     if (std::strcmp(key, kKeyCheatsEnable) == 0) {
         *valueOut = cheats.enableCheats ? 1 : 0;
@@ -340,7 +403,16 @@ int AriaUiSet(const char* key, int value) {
     if (!key) return 0;
     auto& cheats = aria::config::ConfigSystem::Get().GetConfig().cheats;
     auto& gp = aria::config::ConfigSystem::Get().GetConfig().gameplay;
-    if (std::strcmp(key, kKeyCheatsEnable) == 0) {
+    auto& hh = aria::config::ConfigSystem::Get().GetConfig().handheld;
+    if (std::strcmp(key, kKeyHandheldScaling) == 0) {
+        hh.scaling = static_cast<aria::config::HandheldScaling>(std::clamp(value, 0, 2));
+    } else if (std::strcmp(key, kKeyHandheldView) == 0) {
+        hh.viewMode = static_cast<aria::config::HandheldViewMode>(std::clamp(value, 0, 2));
+    } else if (std::strcmp(key, kKeyHandheldHud) == 0) {
+        hh.hideOriginalHud = value != 0;
+    } else if (std::strcmp(key, kKeyHandheldSwap) == 0) {
+        hh.swapScreens = value != 0;
+    } else if (std::strcmp(key, kKeyCheatsEnable) == 0) {
         cheats.enableCheats = value != 0;
     } else if (std::strcmp(key, kKeyCheatsInfiniteHp) == 0) {
         cheats.infiniteHP = value != 0;

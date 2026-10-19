@@ -71,6 +71,7 @@ add_library(aria_shards STATIC ${ARIA_SHARDS})
 # Main Executable
 add_executable(aria_recomp
     src/main.cpp
+    src/graphics/handheld_view.cpp
 )
 
 # In-game settings overlay. gbarecomp adds only the ImGui SDL_Renderer2 adapter
@@ -95,6 +96,7 @@ if(GBARECOMP_RUNTIME_UI_ROOT AND
     # buildable without an overlay checkout at all.
     target_sources(aria_recomp PRIVATE
         src/ui/settings_rows.cpp
+        src/handheld/handheld_ui.cpp
         src/graphics/display_filters.cpp
         src/graphics/hd_ui_system.cpp
         src/graphics/hd_background_system.cpp

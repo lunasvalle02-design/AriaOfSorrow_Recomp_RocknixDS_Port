@@ -309,21 +309,14 @@ void QolSystem::QueryLocalMiniMap(const uint8_t* ewram, size_t ewramSize, int& p
 // =========================================================================
 
 void QolSystem::ProcessDoorTransitions(uint8_t* ewram, size_t ewramSize) {
-    if (!ewram || ewramSize < 0x20000) return;
-
-    // Room transition state object at EWRAM 0x00060 (cvaos code_080109F4.c)
-    // unk_64: 4 = door transition active
-    // unk_65: step (3 = fade out, 4 = room load, 5 = display reset, 6 = fade in)
-    uint8_t* transObj = ewram + qol_offsets::kRoomTransitionObj;
-    if (transObj[0x64] == 4) {
-        if (transObj[0x65] == 3) {
-            // Screen is fading out over multiple frames. Fast-forward immediately to room load.
-            transObj[0x65] = 4;
-        } else if (transObj[0x65] == 6) {
-            // Screen is fading back in over multiple frames. Fast-forward to completion.
-            transObj[0x65] = 1;
-        }
-    }
+    // Disabled. This used to read/write `ewram + 0x60 + 0x64` (0xC4/0xC5), but
+    // the ewram.h comments are absolute offsets: the in-game state lives at
+    // EWRAM 0x64/0x65, and 0xC4 is inside the castle map's visited/revealed
+    // bit planes (0xB4..), so the old code could flip map bits in the save.
+    // At the real address state 4 is the map screen, not a door transition,
+    // so the feature needs the door states re-derived before it can return.
+    (void)ewram;
+    (void)ewramSize;
 }
 
 // =========================================================================

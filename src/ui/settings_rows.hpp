@@ -19,6 +19,8 @@ namespace aria::ui {
 // any of this module's callbacks can run. Call once, before opts.ui_set is
 // ever reachable, so a row edit saves to the same file main.cpp loaded.
 void SetConfigSavePath(std::string path);
+// Writes aria_config.ini and pushes the live config into every system.
+void SaveConfigNow();
 
 // The item array recomp-ui reads from (RunOptions::ui_extra_items /
 // ui_extra_item_count). Declared here as void* + count, matching

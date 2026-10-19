@@ -177,6 +177,29 @@ struct DeveloperConfig {
     bool logStateDeltas = false;
 };
 
+// Dual-screen handheld presentation (ROCKNIX / Anbernic RG DS Plus).
+enum class HandheldViewMode {
+    Extended_240x180 = 0,   // 4:3, extra rows from the room (default)
+    Extended_256x192 = 1,   // 4:3, extra rows and columns; exact 4x on 1024x768
+    Original_240x160 = 2    // faithful 3:2 frame, letterboxed
+};
+
+enum class HandheldScaling {
+    Smooth = 0,     // integer prescale + light linear pass (hides uneven pixels)
+    Nearest = 1,    // plain nearest neighbour (uneven pixel widths)
+    Integer = 2     // largest whole multiple, black border
+};
+
+struct HandheldConfig {
+    bool enabled = false;               // forced on by --handheld / the ROCKNIX launcher
+    HandheldViewMode viewMode = HandheldViewMode::Extended_240x180;
+    HandheldScaling scaling = HandheldScaling::Smooth;
+    bool hideOriginalHud = true;        // the bottom screen shows HP/MP instead
+    bool swapScreens = false;           // game on the bottom panel
+    int mapZoom = 1;                    // 0 = whole castle, 1 = around the player
+    bool showFps = false;
+};
+
 struct PathsConfig {
     std::string romPath;
     std::string biosPath;
@@ -195,6 +218,7 @@ struct AriaConfig {
     SaveStateConfig saveStates;
     AccessibilityConfig accessibility;
     DeveloperConfig developer;
+    HandheldConfig handheld;
 };
 
 class ConfigSystem {

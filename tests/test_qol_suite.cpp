@@ -190,11 +190,14 @@ int main() {
     // =========================================================================
     std::cout << "[TEST] Fast Transitions & Fast Text...\n";
     {
+        // Fast door transitions are disabled: the old code wrote to
+        // 0x60 + 0x65 = 0xC5, which is inside the castle map's visited /
+        // revealed bit planes (0xB4..). It must leave guest memory untouched.
         ewram[qol_offsets::kRoomTransitionObj + 0x64] = 4;
         ewram[qol_offsets::kRoomTransitionObj + 0x65] = 3;
-
+        const std::vector<uint8_t> before = ewram;
         qol.ProcessDoorTransitions(ewram.data(), ewram.size());
-        CHECK(ewram[qol_offsets::kRoomTransitionObj + 0x65] == 4);
+        CHECK(ewram == before);
 
         // Fast text
         ewram[0x131BF] = 0x05; // typewriter delay
