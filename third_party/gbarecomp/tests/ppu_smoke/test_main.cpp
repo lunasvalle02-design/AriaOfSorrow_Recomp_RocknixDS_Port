@@ -185,9 +185,105 @@ void test_extended_view_geometry_and_clamp() {
 
     ppu.set_view_margins(1000, 1000, 7, 9);
     if (ppu.render_width() != gba::GbaPpu::kMaxRenderWidth ||
-        ppu.render_height() != gba::GbaPpu::kScreenHeight ||
-        ppu.view_extra_top() != 0 || ppu.view_extra_bottom() != 0) {
+        ppu.render_height() != gba::GbaPpu::kScreenHeight + 16 ||
+        ppu.view_extra_top() != 7 || ppu.view_extra_bottom() != 9) {
         std::fprintf(stderr, "extended-view clamp mismatch\n");
+        std::exit(1);
+    }
+    // The vertical budget (top + bottom) is shared and capped at kMaxExtraY.
+    ppu.set_view_margins(0, 0, 40, 40);
+    if (ppu.view_extra_top() != gba::GbaPpu::kMaxExtraY ||
+        ppu.view_extra_bottom() != 0 ||
+        ppu.render_height() != gba::GbaPpu::kScreenHeight + gba::GbaPpu::kMaxExtraY) {
+        std::fprintf(stderr, "extended-view vertical budget mismatch\n");
+        std::exit(1);
+    }
+}
+
+// Scanline composition of an expanded view (native compositor for the 240
+// hardware columns, wide compositor only for the margins) must equal the
+// full wide render, synchronously and off-thread; a provider's
+// kWsTilemapVoid draws the layer black there, under sprites.
+int void_right_margin_provider(int /*bg*/, int hw_x, int /*screen_y*/,
+                               uint16_t* /*out_entry*/) {
+    return hw_x >= 240 ? gba::kWsTilemapVoid : gba::kWsTilemapKeepWrapped;
+}
+
+void test_scanline_margins_match_full_wide_render() {
+    Fixture f;
+    const uint16_t dispcnt = 0x1100;  // Mode 0, BG0, OBJ (2D mapping).
+    store16(&f.io[0x08], 0x0180);     // 256 colors, screen block 1.
+    store16(&f.io[0x10], 13);
+    store16(&f.io[0x12], 5);
+    for (std::size_t i = 0; i < 64; ++i) f.vram[i] = static_cast<uint8_t>(i + 1);
+    for (std::size_t i = 0; i < 32u * 32u; ++i)
+        store16(&f.vram[0x800 + i * 2], static_cast<uint16_t>(i & 1u));
+    for (unsigned i = 1; i < 256; ++i) {
+        store16(&f.pal[i * 2], static_cast<uint16_t>(
+            (i & 31u) | (((i * 3u) & 31u) << 5) | (((i * 7u) & 31u) << 10)));
+        store16(&f.pal[0x200 + i * 2], 0x7C00);  // OBJ: blue
+    }
+    disable_all_objects(f);
+    // A 16x16 sprite straddling the right edge (x 232..247) and one fully
+    // inside the native columns.
+    for (std::size_t i = 0; i < 32u * 4u; ++i) f.vram[0x10000 + i] = 0x11;
+    store16(&f.oam[0], 40);               // y 40, square
+    store16(&f.oam[2], 0x4000 | 232);     // 16x16, x 232
+    store16(&f.oam[4], 0);
+    store16(&f.oam[8], 80);
+    store16(&f.oam[10], 0x4000 | 100);
+    store16(&f.oam[12], 0);
+
+    auto run = [&](bool async, bool void_provider, std::vector<uint8_t>* out) {
+        gba::GbaPpu ppu;
+        ppu.set_view_margins(8, 8, 0, 0);
+        gba::g_ws_tilemap_provider = void_provider ? &void_right_margin_provider : nullptr;
+        ppu.set_async_render(async);
+        for (uint32_t y = 0; y < gba::GbaPpu::kScreenHeight; ++y)
+            ppu.render_scanline(y, dispcnt, f.io.data(), f.vram.data(),
+                                f.oam.data(), f.pal.data());
+        ppu.mark_framebuffer_latched();
+        ppu.wait_async_idle();
+        out->assign(ppu.render_bytes(), 0);
+        ppu.copy_latched_framebuffer(out->data());
+        ppu.set_async_render(false);
+        gba::g_ws_tilemap_provider = nullptr;
+    };
+    gba::GbaPpu full;
+    full.set_view_margins(8, 8, 0, 0);
+    std::vector<uint8_t> expected(full.render_bytes(), 0);
+    full.render(expected.data(), dispcnt, f.io.data(), f.vram.data(),
+                f.oam.data(), f.pal.data());
+    std::vector<uint8_t> sync_frame, async_frame;
+    run(false, false, &sync_frame);
+    run(true, false, &async_frame);
+    if (sync_frame != expected) {
+        std::fprintf(stderr, "scanline margins: sync differs from full render\n");
+        std::exit(1);
+    }
+    if (async_frame != expected) {
+        std::fprintf(stderr, "scanline margins: async differs from full render\n");
+        std::exit(1);
+    }
+
+    std::vector<uint8_t> voided;
+    run(false, true, &voided);
+    const std::size_t stride = 256u * 3u;
+    const uint8_t* row10 = voided.data() + 10u * stride;
+    const uint8_t* row44 = voided.data() + 44u * stride;
+    // Right margin, no sprite: BG0 void -> black.
+    if (row10[250 * 3] != 0 || row10[250 * 3 + 1] != 0 || row10[250 * 3 + 2] != 0) {
+        std::fprintf(stderr, "void provider: margin BG was not black\n");
+        std::exit(1);
+    }
+    // Right margin under the straddling sprite (x 248..255 = hw 240..247).
+    if (row44[250 * 3 + 2] != 255) {
+        std::fprintf(stderr, "void provider: sprite lost over void margin\n");
+        std::exit(1);
+    }
+    // Native columns untouched by the provider.
+    if (std::memcmp(voided.data() + 8 * 3, expected.data() + 8 * 3, 240 * 3) != 0) {
+        std::fprintf(stderr, "void provider: native columns changed\n");
         std::exit(1);
     }
 }
@@ -1697,6 +1793,7 @@ int main() {
     test_alpha_native_domain_and_green_precision();
     test_brightness_native_domain_and_green_precision();
     test_extended_view_geometry_and_clamp();
+    test_scanline_margins_match_full_wide_render();
     test_extended_view_capability_policy();
     test_resize_driven_view_policy();
     test_extended_view_preserves_authentic_center();

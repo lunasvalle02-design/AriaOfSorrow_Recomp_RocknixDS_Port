@@ -29,11 +29,11 @@ int g_probe_window_h = 0;
 Rect g_last_game;
 Rect g_last_aux;
 bool g_last_valid = false;
-// sway output names of the two panels (empty without sway) and the swap state
-// the touchscreen mapping was last applied for (-1 = never).
+// sway output names of the two panels (empty without sway) and whether the
+// touchscreen mapping has been applied.
 std::string g_game_output;
 std::string g_aux_output;
-int g_touch_swap_applied = -1;
+bool g_touch_mapped = false;
 
 bool parse_rect(const char* text, Rect* out) {
     if (!text || !*text) return false;
@@ -193,23 +193,29 @@ void probe_sway() {
 #endif
 }
 
-// Keeps every touchscreen mapped to whichever panel shows the auxiliary UI
-// (the bottom panel unless the screens are swapped). Runs only on change.
-void sync_touch_mapping(bool swap) {
+// Maps the touchscreen once. The digitizer is glued to one physical panel, so
+// the mapping never follows the game/UI swap. ROCKNIX's RG DS quirk installs a
+// udev LIBINPUT_CALIBRATION_MATRIX of "0.5 0 0.5 0 1 0", which already folds
+// the touch range onto the right half of the whole output layout (the bottom
+// panel, DSI-1 at x=1024). That matrix only lands on the panel when the device
+// is mapped to the whole layout (`map_to_output *`, what RetroArch uses on
+// ROCKNIXDS); mapping it to DSI-1 alone squeezes every tap toward the panel's
+// right edge. ARIA_DS_TOUCH_OUTPUT overrides the target (e.g. DSI-1 on a
+// setup without that calibration matrix).
+void sync_touch_mapping() {
 #if !defined(_WIN32)
-    std::string target;
     {
         std::lock_guard<std::mutex> lk(g_mutex);
-        if (g_game_output.empty() || g_touch_swap_applied == (swap ? 1 : 0)) return;
-        g_touch_swap_applied = swap ? 1 : 0;
-        target = swap ? g_game_output : g_aux_output;
+        if (g_game_output.empty() || g_touch_mapped) return;
+        g_touch_mapped = true;
     }
     if (std::getenv("ARIA_DS_NO_SWAYMSG")) return;
+    const char* env = std::getenv("ARIA_DS_TOUCH_OUTPUT");
+    const std::string target = env && *env ? env : "*";
+    std::fprintf(stderr, "dual_screen: touch mapped to output %s\n", target.c_str());
     const std::string cmd = "swaymsg 'input type:touch map_to_output " + target +
                             "' >/dev/null 2>&1";
     std::system(cmd.c_str());
-#else
-    (void)swap;
 #endif
 }
 
@@ -244,7 +250,7 @@ void attach_to_compositor() {
         std::system(cmd);
     }
 #endif
-    sync_touch_mapping(config().swap);
+    sync_touch_mapping();
 }
 
 void preferred_window_size(int* w, int* h) {
@@ -310,7 +316,6 @@ bool layout(int drawable_w, int drawable_h, Rect* game, Rect* aux) {
     g = scale(g);
     a = scale(a);
     if (cfg.swap) std::swap(g, a);
-    sync_touch_mapping(cfg.swap);
     if (game) *game = g;
     if (aux) *aux = a;
     std::lock_guard<std::mutex> lk(g_mutex);

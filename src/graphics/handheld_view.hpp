@@ -59,6 +59,8 @@ private:
         int width = 0;            // layer size in pixels (block map extent)
         int height = 0;
         bool streamed = false;    // larger than the 256x256 hardware ring
+        // Authored extent [authX0, authX1) x [authY0, authY1), world pixels.
+        int authX0 = 0, authX1 = 0, authY0 = 0, authY1 = 0;
     };
 
     const uint8_t* Resolve(uint32_t guest, size_t bytes) const;

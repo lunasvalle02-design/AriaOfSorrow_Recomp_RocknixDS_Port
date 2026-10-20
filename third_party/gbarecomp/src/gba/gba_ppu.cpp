@@ -781,10 +781,13 @@ void render_scanline_internal(uint8_t* rgb,
                               const uint8_t* oam,
                               const uint8_t* pal,
                               uint32_t kScreenWidth,
-                              uint32_t kScreenHeight) {
+                              uint32_t kScreenHeight,
+                              uint32_t row_stride = 0) {
     if (y >= kScreenHeight) return;
 
-    uint8_t* row = rgb + y * kScreenWidth * 3;
+    // row_stride (pixels) lets the 240 native columns land inside a wider
+    // expanded-view row; 0 = packed rows of kScreenWidth.
+    uint8_t* row = rgb + y * (row_stride ? row_stride : kScreenWidth) * 3;
     if (dispcnt & 0x0080u) {
         std::memset(row, 0xFF, kScreenWidth * 3);
         return;
@@ -1424,10 +1427,18 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
                           const uint8_t* io, const uint8_t* vram,
                           const uint8_t* oam, const uint8_t* pal,
                           uint32_t out_w, uint32_t ox,
-                          uint32_t extra_bottom) {
+                          uint32_t extra_bottom,
+                          bool margins_only = false) {
     constexpr uint32_t kVanW = GbaPpu::kScreenWidth;   // 240
     constexpr uint32_t kVanH = GbaPpu::kScreenHeight;  // 160
     const bool vertical_margin = y < 0 || y >= static_cast<int>(kVanH);
+    // margins_only: a native line whose 240 hardware columns the native
+    // compositor writes; only the side columns [0,ox) and [ox+240,out_w) are
+    // composed and stored here.
+    margins_only = margins_only && !vertical_margin;
+    auto central = [&](uint32_t x) {
+        return margins_only && x >= ox && x < ox + kVanW;
+    };
 
     uint8_t* row = rgb + out_row * out_w * 3;
     if (vertical_margin &&
@@ -1435,16 +1446,26 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
         std::memset(row, 0, out_w * 3);
         return;
     }
-    if (dispcnt & 0x0080u) { std::memset(row, 0xFF, out_w * 3); return; }
+    if (dispcnt & 0x0080u) {
+        if (margins_only) {
+            std::memset(row, 0xFF, ox * 3);
+            std::memset(row + (ox + kVanW) * 3, 0xFF, (out_w - ox - kVanW) * 3);
+        } else {
+            std::memset(row, 0xFF, out_w * 3);
+        }
+        return;
+    }
 
+    // Trivial (no member initializers): the two per-column arrays below are
+    // initialized explicitly, and only for the columns this call composes.
     struct PixelCandidate {
-        uint8_t rgb[3] = {0, 0, 0};
-        uint16_t color = 0;
-        int key = 0x7FFFFFFF;
-        uint8_t layer = 5;
-        bool target1 = false;
-        bool target2 = false;
-        bool valid = false;
+        uint8_t rgb[3];
+        uint16_t color;
+        int key;
+        uint8_t layer;
+        bool target1;
+        bool target2;
+        bool valid;
     };
 
     const bool win0_en   = (dispcnt & 0x2000u) != 0;
@@ -1524,8 +1545,10 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
     // WIN0/WIN1/OBJ-window branches for the backdrop, every BG, and every OBJ
     // pixel. The fixed-size stack array covers the renderer's clamped width.
     uint8_t window_controls[GbaPpu::kMaxRenderWidth];
-    for (uint32_t x = 0; x < out_w; ++x)
+    for (uint32_t x = 0; x < out_w; ++x) {
+        if (central(x)) { x = ox + kVanW - 1; continue; }
         window_controls[x] = static_cast<uint8_t>(window_control(x) & 0x3Fu);
+    }
     auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
         return (window_controls[x] & (1u << layer_bit)) != 0;
     };
@@ -1545,6 +1568,12 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
     uint8_t backdrop_rgb[3];
     to_rgb888(backdrop_color, backdrop_rgb);
     for (uint32_t x = 0; x < out_w; ++x) {
+        if (central(x)) { x = ox + kVanW - 1; continue; }
+        second[x].rgb[0] = second[x].rgb[1] = second[x].rgb[2] = 0;
+        second[x].color = 0;
+        second[x].key = 0x7FFFFFFF;
+        second[x].layer = 5;
+        second[x].target1 = second[x].target2 = second[x].valid = false;
         top[x].rgb[0] = backdrop_rgb[0];
         top[x].rgb[1] = backdrop_rgb[1];
         top[x].rgb[2] = backdrop_rgb[2];
@@ -1593,6 +1622,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
         int memo_action = 0;
         uint16_t memo_entry = 0;
         for (uint32_t x = 0; x < out_w; ++x) {
+            if (central(x)) { x = ox + kVanW - 1; continue; }
             int hx = static_cast<int>(x) - static_cast<int>(ox);
             const bool authored_margin = g_ws_authored_margin_layers &&
                 (hx < 0 || hx >= static_cast<int>(kVanW));
@@ -1659,6 +1689,10 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
                     const uint16_t ext = memo_entry;
                     if (action == kWsTilemapReplace) {
                         entry = ext;
+                    } else if (action == kWsTilemapVoid) {
+                        submit(x, 0, static_cast<int>(bg_priority * 256u + 128u + layer),
+                               static_cast<uint8_t>(layer), false, false);
+                        continue;
                     } else if (action != kWsTilemapKeepWrapped) {
                         continue;
                     }
@@ -1749,7 +1783,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
             const int32_t sample_y = yt;
             xt += pa;
             yt += pc;
-            if (!layer_enabled(x, layer)) continue;
+            if (central(x) || !layer_enabled(x, layer)) continue;
             const int32_t tex_x = sample_x >> 8;
             const int32_t tex_y = sample_y >> 8;
             uint16_t color = 0;
@@ -1828,7 +1862,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
             int32_t tex_y = yt >> 8;
             xt += pa;
             yt += pc;
-            if (!layer_enabled(x, layer)) continue;
+            if (central(x) || !layer_enabled(x, layer)) continue;
             if (tex_x < 0 || tex_x >= bmp_w || tex_y < 0 || tex_y >= bmp_h)
                 continue;
             const uint32_t off = frame_base +
@@ -1873,7 +1907,8 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
     // 240x160 GBA screen domain. As in the faithful path, it is synthetic BG2
     // for window/effect handling, is below guest OBJ, and disappears whenever
     // a full foreign background has been published.
-    if (foreign_presentation_internal::background() == nullptr) {
+    if (!margins_only &&
+        foreign_presentation_internal::background() == nullptr) {
         if (const auto* overlay = foreign_presentation_internal::screen_overlay();
             valid_foreign_screen_overlay(overlay)) {
             const int left = static_cast<int>(ox) + overlay->x;
@@ -1971,6 +2006,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
             bool obj_target2 = (second_targets & (1u << 4)) != 0;
             auto emit_obj = [&](int tex_x, int tex_y, int screen_x) {
                 if (screen_x < 0 || screen_x >= static_cast<int>(out_w)) return;
+                if (central(static_cast<uint32_t>(screen_x))) return;
                 // Opt-in policy: hardware-faithful OBJ placement only within
                 // the native viewport; margin columns never show sprites the
                 // guest believed were off-screen.
@@ -2026,6 +2062,8 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
                 int j = static_cast<int>(y) - sy;
                 if (j < 0 || j >= bh) continue;
                 if (!obj_focus_active) resolve_sx();
+                if (margins_only && sx >= 0 && sx + bw <= static_cast<int>(kVanW))
+                    continue;  // entirely inside the native columns
                 int affine_group = (attr1 >> 9) & 0x1Fu;
                 const uint8_t* ag = oam + affine_group * 0x20u;
                 int32_t pa = read_s16(ag, 0x06);
@@ -2060,6 +2098,8 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
             int line = static_cast<int>(y) - sy;
             if (line < 0 || line >= draw_h) continue;
             if (!obj_focus_active) resolve_sx();
+            if (margins_only && sx >= 0 && sx + draw_w <= static_cast<int>(kVanW))
+                continue;  // entirely inside the native columns
             bool hflip = (attr1 & 0x1000u) != 0;
             bool vflip = (attr1 & 0x2000u) != 0;
             const int source_y = nearest_source_pixel(line, sh, draw_h);
@@ -2082,6 +2122,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
     uint32_t bldy = static_cast<uint32_t>(io[0x54] | (io[0x55] << 8)) & 0x1Fu;
     if (bldy > 16u) bldy = 16u;
     for (uint32_t x = 0; x < out_w; ++x) {
+        if (central(x)) { x = ox + kVanW - 1; continue; }
         uint8_t* dst = row + x * 3;
         // OBJ-only presentations (notably the real GBA BIOS logo) author the
         // whole backdrop through palette entry 0. There is no regular-BG
@@ -2485,25 +2526,46 @@ void GbaPpu::render_scanline(uint32_t y,
         top_margin_dispcnt_ = dispcnt;
     }
     const uint32_t bottom = extra_top_ + extra_bottom_ - active_top_;
-    if (async_ && (extra_left_ | extra_right_) == 0) {
-        // Record only; the worker composes this line after VBlank.
-        LineRegs& line = async_capture_->lines[y];
+    const uint32_t ow = render_width();
+    // The 160 hardware lines' native 240 columns are exactly native scanlines:
+    // they take the (much cheaper) native compositor, written in place into
+    // the wider row. Only side margin columns and margin rows, which consult
+    // the tilemap provider (live game state), need the wide path.
+    if (async_) {
+        // Record only; the worker composes the native columns after VBlank.
+        AsyncFrame& f = *async_capture_;
+        LineRegs& line = f.lines[y];
         line.dispcnt = dispcnt;
         std::memcpy(line.io.data(), affine_io.data(), line.io.size());
+        // OAM/palette writes during the visible frame take effect on the next
+        // lines (as on hardware); keep a copy whenever they changed.
+        if (y == 0) f.oam_count = f.pal_count = 0;
+        if (f.oam_count == 0 ||
+            std::memcmp(f.oams[f.oam_count - 1].data(), oam, 1024u) != 0) {
+            if (f.oam_count < kScreenHeight) ++f.oam_count;
+            std::memcpy(f.oams[f.oam_count - 1].data(), oam, 1024u);
+        }
+        if (f.pal_count == 0 ||
+            std::memcmp(f.pals[f.pal_count - 1].data(), pal, 1024u) != 0) {
+            if (f.pal_count < kScreenHeight) ++f.pal_count;
+            std::memcpy(f.pals[f.pal_count - 1].data(), pal, 1024u);
+        }
+        line.oam_idx = static_cast<uint8_t>(f.oam_count - 1);
+        line.pal_idx = static_cast<uint8_t>(f.pal_count - 1);
         async_vram_ = vram;
         async_oam_ = oam;
         async_pal_ = pal;
-    } else if ((extra_left_ | extra_right_) == 0) {
-        // Vertical-only expansion: the 160 hardware lines are exactly the
-        // native scanlines, so they take the (much cheaper) native compositor
-        // into the shifted rows; only the margin rows need the wide path.
-        render_scanline_internal(work_fb_.data() + active_top_ * kScreenWidth * 3u,
-                                 y, dispcnt, affine_io.data(), vram, oam, pal,
-                                 kScreenWidth, kScreenHeight);
     } else {
+        render_scanline_internal(
+            work_fb_.data() + (static_cast<std::size_t>(active_top_) * ow + extra_left_) * 3u,
+            y, dispcnt, affine_io.data(), vram, oam, pal,
+            kScreenWidth, kScreenHeight, ow);
+    }
+    if ((extra_left_ | extra_right_) != 0) {
         render_scanline_wide(work_fb_.data(), static_cast<int>(y),
                              y + active_top_, dispcnt, affine_io.data(),
-                             vram, oam, pal, render_width(), extra_left_, bottom);
+                             vram, oam, pal, ow, extra_left_, bottom,
+                             /*margins_only=*/true);
     }
     if (y + 1 == kScreenHeight && (extra_top_ | extra_bottom_) != 0) {
         render_vertical_margins(dispcnt, affine_io.data(), vram, oam, pal);
@@ -2527,29 +2589,23 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
 }
 
 void GbaPpu::mark_framebuffer_latched() {
-    if (async_ && async_vram_ && async_oam_ && async_pal_ &&
-        (extra_left_ | extra_right_) == 0) {
-        // VBlank start: the VRAM/OAM/PAL the frame was displayed with (the
-        // game's own VBlank uploads have not run yet). The margin rows were
-        // already composed into work_fb_ at line 159.
+    if (async_ && async_vram_ && async_oam_ && async_pal_) {
+        // VBlank start: the VRAM the frame was displayed with (the game's own
+        // VBlank uploads have not run yet; OAM/PAL were captured per line).
+        // The margin rows were already composed into work_fb_ at line 159.
         AsyncFrame& f = *async_capture_;
         std::memcpy(f.vram.data(), async_vram_, f.vram.size());
-        std::memcpy(f.oam.data(), async_oam_, f.oam.size());
-        std::memcpy(f.pal.data(), async_pal_, f.pal.size());
         f.top = active_top_;
+        f.width = render_width();
+        f.left = extra_left_;
         std::unique_lock<std::mutex> lk(async_mutex_);
         // Back-pressure: never drop a frame, wait for the previous one.
         async_cv_.wait(lk, [this] { return !async_busy_; });
-        const std::size_t stride = static_cast<std::size_t>(render_width()) * 3u;
-        const std::size_t margin_top = static_cast<std::size_t>(active_top_) * stride;
-        const std::size_t native_end =
-            static_cast<std::size_t>(active_top_ + kScreenHeight) * stride;
-        // Margin rows travel with the job so the worker publishes a coherent
-        // frame.
-        std::memcpy(async_fb_.data(), work_fb_.data(), margin_top);
-        std::memcpy(async_fb_.data() + native_end, work_fb_.data() + native_end,
-                    render_bytes() - native_end);
+        // Margin rows and side columns travel with the job so the worker
+        // publishes a coherent frame; it overwrites the native columns.
+        std::memcpy(async_fb_.data(), work_fb_.data(), render_bytes());
         std::swap(async_capture_, async_job_);
+        async_capture_->oam_count = async_capture_->pal_count = 0;
         async_busy_ = true;
         lk.unlock();
         async_cv_.notify_all();
@@ -2569,12 +2625,13 @@ void GbaPpu::async_worker() {
         }
         const AsyncFrame& f = *async_job_;
         uint8_t* rows = async_fb_.data() +
-                        static_cast<std::size_t>(f.top) * kScreenWidth * 3u;
+                        (static_cast<std::size_t>(f.top) * f.width + f.left) * 3u;
         for (uint32_t y = 0; y < kScreenHeight; ++y) {
             render_scanline_internal(rows, y, f.lines[y].dispcnt,
                                      f.lines[y].io.data(), f.vram.data(),
-                                     f.oam.data(), f.pal.data(),
-                                     kScreenWidth, kScreenHeight);
+                                     f.oams[f.lines[y].oam_idx].data(),
+                                     f.pals[f.lines[y].pal_idx].data(),
+                                     kScreenWidth, kScreenHeight, f.width);
         }
         {
             std::lock_guard<std::mutex> lk(async_mutex_);

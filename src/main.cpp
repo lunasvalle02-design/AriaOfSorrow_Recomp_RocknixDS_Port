@@ -736,6 +736,11 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "--handheld") {
             configSystem.GetConfig().handheld.enabled = true;
+        } else if (arg == "--handheld-256x192") {
+            // Same as --handheld with the 256x192 format (testing aid).
+            configSystem.GetConfig().handheld.enabled = true;
+            configSystem.GetConfig().handheld.viewMode =
+                aria::config::HandheldViewMode::Extended_256x192;
         } else if (arg == "--rom" && i + 1 < argc) {
             romPath = argv[++i];
             romSpecifiedViaCli = true;
@@ -1031,7 +1036,7 @@ int main(int argc, char* argv[]) {
             ++i; // skip argument value
             continue;
         }
-        if (arg == "--handheld") continue;
+        if (arg == "--handheld" || arg == "--handheld-256x192") continue;
         if (arg == romPath || arg == biosPath) continue;
         args.push_back(arg);
     }

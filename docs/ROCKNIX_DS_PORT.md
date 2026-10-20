@@ -4,8 +4,7 @@
 
 En ROCKNIX la RG DS / RG DS Plus ejecuta **sway**, y cada panel es una salida
 Wayland: **`DSI-2` es el superior y `DSI-1` el inferior táctil** (pantalla Goodix;
-así lo configura la `sway-config.theme` de ROCKNIXDS). Al arrancar, el táctil
-se mapea al panel de la interfaz con `input type:touch map_to_output`. El port no usa dos ventanas: abre **una
+así lo configura la `sway-config.theme` de ROCKNIXDS). El port no usa dos ventanas: abre **una
 ventana sin bordes** y, al arrancar, le pide a sway `fullscreen enable global`
 (pantalla completa repartida entre todas las salidas) mediante una regla
 `for_window [pid=…]` y una orden directa.
@@ -19,6 +18,20 @@ cada panel por este orden:
    rectángulo que engloba todas las salidas.
 3. Si no hay sway: la ventana se parte por la mitad (en horizontal si es más
    ancha que ~5:3, apilada en vertical si no).
+
+### Táctil
+
+ROCKNIX instala para la RG DS / RG DS Plus una regla udev
+(`quirks/devices/Anbernic RG DS Plus/touchcontrol`) con
+`LIBINPUT_CALIBRATION_MATRIX="0.5 0 0.5 0 1 0"`: la calibración ya lleva el
+táctil a la mitad derecha del escritorio, es decir, a `DSI-1`. Solo cae en su
+sitio si el dispositivo está asociado a **todo** el escritorio
+(`map_to_output *`, lo mismo que hace ROCKNIXDS para RetroArch). La primera
+versión del port lo asociaba a `DSI-1` y la calibración lo comprimía otra vez:
+un toque en x llegaba a 512 + x/2, unos 2,5 cm a la derecha en el centro. Ahora
+`dual_screen.cpp` ejecuta una vez `swaymsg 'input type:touch map_to_output *'`
+(o la salida de `ARIA_DS_TOUCH_OUTPUT`). El digitalizador va pegado al panel
+inferior, así que el mapeo no depende de *Pantalla del juego*.
 
 `HostWindow::present()` dibuja el fotograma en el panel del juego con el modo de
 escalado elegido, y la pasada de ImGui dibuja la interfaz de Aria en el otro.
@@ -83,12 +96,21 @@ Datos sacados de la descompilación (`third_party/cvaos`):
   de 32×32 → metatile 4×4 con volteos → entrada de tilemap, con la tabla de
   metatiles en ROM o en RAM (`0x0A108` para BG1, `0x0C0EC` para las demás). BG0
   (HUD, diálogos, rótulos) nunca se amplía.
-- **Banda dibujable**: cada pantalla del mapa mide 256 px, pero la cámara nunca
-  baja de y=48 ni pasa de (alto−208). Las filas justo fuera de ese rango
-  continúan la sala; solo el borde del bloque más externo es relleno sin
-  terminar. La ventana 4:3 se limita a `[32, alto−16)` (16 filas de margen
-  posible por cada lado; el 240×180 usa 10) y el reparto arriba/abajo se ajusta
-  para no salir de esa banda: una cámara 4:3 real limitada a la sala.
+- **Extensión con contenido**: cada pantalla del mapa mide 256 px, pero la
+  cámara nunca sube de y=48 ni baja de (alto−208), así que cada capa solo
+  garantiza contenido en `x ∈ [0, ancho)`, `y ∈ [48, pantallas·256−48)`. Fuera
+  de eso hay datos que el juego nunca enseña: el fondo fijo de una pantalla
+  (240×208) repite basura del anillo de VRAM pasada la columna 240 y fuera de
+  las filas 48–207 (la luna duplicada y los bloques cian de la primera versión),
+  y el mapa de bloques de la sala tiene relleno sin terminar bajo el suelo. El
+  proveedor devuelve `kWsTilemapVoid` en esas muestras y el PPU pinta la capa
+  de negro opaco a su prioridad: los sprites y capas delanteras siguen encima y
+  no se cuela nada de detrás.
+- **Ventana 4:3**: limitada a la extensión de BG1. Junto al borde, todas las
+  filas extra pasan al otro lado. Si la sala es más baja que la ventana (un
+  pasillo de una pantalla de alto mide justo 160 filas), se muestra lo que hay
+  y el resto queda en negro, centrado. Las columnas extra del 256×192 usan la
+  misma regla, con barras negras en el lado que se sale de la sala.
 - **Enemigos**: el juego crea entidades a ±80 px de la cámara
   (`sub_0800F4F8`/`sub_0800F5BC`) y las dibuja con y entre −32 y 224
   (`sub_0803AC40`). Las que caen en las franjas nuevas ya existen y ya están en
@@ -139,10 +161,17 @@ mitad del tiempo total. Cambios, todos con salida idéntica píxel a píxel
   extra; el compositor ancho solo para las 20 filas de margen, con caché por
   tile de las consultas al mapa de la sala.
 - **Composición asíncrona** (`GbaPpu::set_async_render`, `RunOptions::async_ppu`,
-  `[Handheld] asyncRender`): cada línea solo guarda sus registros; al empezar el
-  VBlank se copian VRAM/OAM/PAL y otro hilo compone el fotograma. Las filas de
-  margen se siguen componiendo en el hilo del juego en la línea 159 (consultan
-  estado vivo). No reproduce escrituras a VRAM/OAM/PAL a mitad de fotograma.
+  `[Handheld] asyncRender`): cada línea guarda sus registros y, si cambiaron
+  desde la línea anterior, una copia de OAM y paleta. Al empezar el VBlank se
+  copia la VRAM y otro hilo compone las 240 columnas nativas. Las columnas y
+  filas de margen se componen en el hilo del juego, porque consultan estado
+  vivo. No reproduce escrituras a VRAM a mitad de fotograma.
+- **256×192**: las 240 columnas nativas de cada línea van por el compositor
+  nativo, escritas en su sitio dentro de la fila de 256, y por tanto también
+  fuera del hilo del juego. El compositor ancho solo hace las 8+8 columnas
+  laterales (`margins_only`) y las filas de margen. En PC, 3000 fotogramas:
+  11,1 → 8,8 µs por línea en síncrono y 2,5 µs en el hilo del juego con la
+  composición asíncrona (antes no podía usarse en este formato).
 - **Pantalla inferior a 20 Hz** desde una textura en caché
   (`GBARECOMP_AUX_UI_DIVIDER`, por defecto 3).
 - **Audio**: colchón de 100 ms (`[Handheld] audioLatencyMs`,
@@ -163,9 +192,10 @@ Nada de esto se ha podido comprobar sin una RG DS Plus:
 2. **`fullscreen enable global`** con la configuración de sway de ROCKNIX. Si la
    ventana no se extiende a los dos paneles, fija los rectángulos con
    `ARIA_DS_WINDOW`, `ARIA_DS_GAME_RECT` y `ARIA_DS_AUX_RECT`.
-3. **Táctil del panel inferior.** Debe estar asociado al seat de sway y mapeado a
-   su salida (`input … map_to_output`). Sin táctil, todo lo de AJUSTES está
-   también en el menú de recomp-ui (L+R+Start).
+3. **Táctil del panel inferior.** Corregido tras la segunda prueba (ver
+   *Táctil*). Si sigue desplazado en tu sistema, prueba
+   `ARIA_DS_TOUCH_OUTPUT=DSI-1` en el lanzador. Sin táctil, todo lo de AJUSTES
+   está también en el menú de recomp-ui (L+R+Start).
 4. **Rendimiento en el Cortex-A55.** En PC el modo 4:3 cuesta ~15 % más que el
    original (3000 fotogramas: 10,0 s frente a 8,7 s). Activa el contador de FPS;
    el objetivo es 59,7.

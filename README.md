@@ -15,9 +15,9 @@ de antemano, así que en la consola se ejecuta código ARM64 nativo, sin emulado
 
 | | |
 |---|---|
-| **Dos pantallas reales** | Una ventana ocupa las dos salidas de sway: el juego se dibuja en el panel superior (`DSI-2`) y la interfaz en el inferior táctil (`DSI-1`, al que se mapea el táctil). |
+| **Dos pantallas reales** | Una ventana ocupa las dos salidas de sway: el juego se dibuja en el panel superior (`DSI-2`) y la interfaz en el inferior táctil (`DSI-1`). El táctil se asocia a todo el escritorio para que la calibración de ROCKNIX lo lleve al panel inferior. |
 | **Pantalla superior en 4:3 de verdad** | El juego se renderiza a **240×180** en lugar de 240×160. Las 20 filas extra no son relleno: salen del mapa de bloques real de la sala, con todas sus capas, y los sprites que el juego ya mantiene vivos fuera de su cámara (enemigos, proyectiles, objetos) aparecen en esas franjas en vez de entrar de golpe. |
-| **Cámara 4:3 ajustada a la sala** | Las filas extra se reparten cada fotograma entre arriba y abajo para no salirse de la zona dibujada de la sala (en salas verticales, junto al techo o al suelo, toda la ampliación pasa al otro lado). Menús, mapa del juego y escenas: bandas negras. |
+| **Cámara 4:3 ajustada a la sala** | Solo se muestra lo que la cámara del juego puede llegar a enseñar de cada capa; fuera de eso, negro, nunca datos repetidos de la VRAM. Las filas extra se reparten cada fotograma entre arriba y abajo (junto al techo o al suelo, toda la ampliación pasa al otro lado). En pasillos de una pantalla de alto no hay filas extra y quedan franjas negras. Menús, mapa del juego y escenas: bandas negras. |
 | **Pantalla inferior** | Pestañas táctiles **ESTADO** (vida, magia, nivel, EXP, oro, atributos, último enemigo y si tienes su alma, y el mapa en tiempo real alrededor del jugador), **MAPA** (castillo completo o ampliado; toca para cambiar) y **AJUSTES**. |
 | **HUD original sustituido** | Las barras de vida/magia y el contador de PV desaparecen de la pantalla superior (opcional). |
 | **Escalado** | *Suavizado* (por defecto): escalado entero 4× y un último paso lineal muy corto hasta 1024×768, para disimular que 768/180 = 4,27 no es entero. *Sin filtro*: vecino más próximo. *Entero 4×*: 960×720 con borde. |
@@ -38,7 +38,9 @@ Controles: los de la GBA. Menú completo (estados de guardado, trucos, opciones)
 ### Rendimiento
 
 - La composición de la imagen se hace en otro núcleo del RK3568 mientras el
-  juego avanza al siguiente fotograma (`asyncRender`, un fotograma de latencia).
+  juego avanza al siguiente fotograma (`asyncRender`, un fotograma de latencia),
+  también en 256×192: ahí el hilo del juego solo compone las columnas y filas
+  de margen.
 - El compositor de líneas trabaja por tiles (≈27 % menos de tiempo por línea,
   resultado idéntico píxel a píxel).
 - La pantalla inferior se redibuja a 20 Hz desde una textura en caché (al

@@ -1,6 +1,7 @@
 #include "graphics/handheld_view.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -18,6 +19,7 @@ enum WsTilemapProviderResult : int {
     kWsTilemapUnavailable = 0,
     kWsTilemapReplace = 1,
     kWsTilemapKeepWrapped = 2,
+    kWsTilemapVoid = 3,
 };
 
 // EWRAM layout (third_party/cvaos/include/structs/ewram.h). Offsets are from
@@ -134,6 +136,46 @@ void HandheldView::UpdateFrame(const gbarecomp::ExtendedViewFrameInfo* frame,
             layer.streamed = false;
         }
     }
+    // Authored extent of each layer, in its own world coordinates: what the
+    // game camera can ever show. It never shows a layer outside x in
+    // [0, width) nor y in [48, screens*256 - 48) (camera y in
+    // [48, height - 208]), and nothing past that is guaranteed: a fixed
+    // single-screen backdrop (240x208) holds stale data past column 240 and
+    // outside rows 48-207 of the hardware ring (duplicated moon, cyan blocks),
+    // and the room's own block map has unfinished filler below the camera's
+    // range (dark blocks under the floor). Samples outside the extent are
+    // drawn black (kWsTilemapVoid) instead.
+    for (int bg = 0; bg < 4; ++bg) {
+        Layer& layer = m_layers[bg];
+        const uint8_t* meta = Resolve(layer.metaGuest, 0x10);
+        if (!meta) {
+            layer.authX0 = layer.authX1 = layer.authY0 = layer.authY1 = 0;
+            continue;
+        }
+        layer.authX0 = 0;
+        layer.authX1 = layer.width;
+        layer.authY0 = 48;
+        layer.authY1 = std::max<int>(1, meta[1]) * 256 - 48;
+    }
+    if (std::getenv("ARIA_DEBUG_LAYERS")) {
+        static unsigned s_n = 0;
+        if ((s_n++ % 50) == 0) {
+            for (int bg = 0; bg < 4; ++bg) {
+                const Layer& l = m_layers[bg];
+                const uint8_t* meta = Resolve(l.metaGuest, 0x10);
+                const uint16_t cnt = Rd16(frame->io + 0x08 + bg * 2);
+                std::fprintf(stderr,
+                    "layers f%u bg%d on=%d cnt=%04x meta=%08x [%d %d flags=%04x tbl=%08x map=%08x] "
+                    "origin=%d,%d size=%dx%d hw=%u,%u auth=[%d,%d)x[%d,%d) prio=%u\n",
+                    s_n, bg, (dispcnt >> (8 + bg)) & 1, cnt, l.metaGuest,
+                    meta ? meta[0] : -1, meta ? meta[1] : -1, meta ? Rd16(meta + 2) : 0,
+                    meta ? Rd32(meta + 4) : 0, meta ? Rd32(meta + 0x0C) : 0,
+                    l.originX, l.originY, l.width, l.height,
+                    Rd16(frame->io + 0x10 + bg * 4) & 0x1FF, Rd16(frame->io + 0x12 + bg * 4) & 0x1FF,
+                    l.authX0, l.authX1, l.authY0, l.authY1, cnt & 3u);
+            }
+        }
+    }
     const Layer& field = m_layers[1];
     if (field.width <= 0 || field.height <= 0) {
         notField();
@@ -143,21 +185,16 @@ void HandheldView::UpdateFrame(const gbarecomp::ExtendedViewFrameInfo* frame,
     m_roomW = field.width;
     m_roomH = field.height;
 
-    // Vertical: a 4:3 camera clamped to the room's drawable band. The game
-    // camera's 160 rows sit `top` rows below the top of the taller window.
-    //
-    // Every 256px map screen is authored taller than the 160 lines the GBA
-    // shows: the camera never goes above y=48 nor below (height - 208), and
-    // the rows just outside that range continue the room (walls, floor,
-    // ceiling). Only the outermost block row's edge is unfinished filler, so
-    // the 4:3 window may use [32, height - 16): 16 extra rows each way, more
-    // than the 10 a 240x180 frame needs.
+    // Vertical: a 4:3 camera clamped to the room's visible band, the rows
+    // the game camera can reach (BG1's authored extent). The game camera's
+    // 160 rows sit `top` rows below the top of the taller window. Next to the
+    // band's ends the extra rows move to the other side; a room whose band
+    // is shorter than the window (a single-screen-tall corridor is exactly
+    // 160 rows) shows what exists and keeps the rest black, centered.
     const int camY = field.originY;
     const int viewH = 160 + static_cast<int>(extraV);
-    const int bandTop = 32;
-    const int bandBottom = std::max(bandTop, m_layers[1].height == 208
-                                                 ? 256 - 16
-                                                 : m_layers[1].height - 16);
+    const int bandTop = field.authY0;
+    const int bandBottom = std::max(bandTop, field.authY1);
     int top = static_cast<int>(extraV) / 2;
     if (bandBottom - bandTop >= viewH) {
         const int effTop = std::clamp(camY - top, bandTop, bandBottom - viewH);
@@ -165,10 +202,12 @@ void HandheldView::UpdateFrame(const gbarecomp::ExtendedViewFrameInfo* frame,
         g_ws_letterbox_top = 0;
         g_ws_letterbox_bottom = 0;
     } else {
-        // Band shorter than the window: show what exists, black beyond it.
-        top = std::clamp(camY - bandTop, 0, static_cast<int>(extraV));
-        g_ws_letterbox_top = top == 0;
-        g_ws_letterbox_bottom = camY + 160 >= bandBottom;
+        const int above = std::max(0, camY - bandTop);
+        const int below = std::max(0, bandBottom - (camY + 160));
+        const int deficit = std::max(0, static_cast<int>(extraV) - above - below);
+        top = std::clamp(above + deficit / 2, 0, static_cast<int>(extraV));
+        g_ws_letterbox_top = above == 0;
+        g_ws_letterbox_bottom = below == 0;
     }
     if (const char* dbg = std::getenv("ARIA_DEBUG_SPLIT_TOP")) {
         top = std::clamp(std::atoi(dbg), 0, static_cast<int>(extraV));
@@ -197,17 +236,22 @@ int HandheldView::ProvideTilemapEntry(int bg, int hw_x, int screen_y, uint16_t* 
     if (bg == 0) return kWsTilemapUnavailable;
     const Layer& layer = m_layers[bg];
     const uint8_t* meta = Resolve(layer.metaGuest, 0x10);
-    if (!meta) return kWsTilemapKeepWrapped;
-    // A layer that fits the hardware ring is fully resident there.
-    if (!layer.streamed && bg != 1) return kWsTilemapKeepWrapped;
+    // Not one of the game's described layers: no continuation at all.
+    if (!meta) return kWsTilemapUnavailable;
 
     const int wx = layer.originX + hw_x;
     const int wy = layer.originY + screen_y;
+    // Outside the layer's authored extent: never sample the ring there.
+    if (wx < layer.authX0 || wx >= layer.authX1 ||
+        wy < layer.authY0 || wy >= layer.authY1)
+        return kWsTilemapVoid;
+    // A single-screen layer is fully resident in the hardware ring.
+    if (!layer.streamed && bg != 1) return kWsTilemapKeepWrapped;
+
     const int blocksW = meta[0] * 8;
     const int blocksH = meta[1] * 8;
-    if (wx < 0 || wy < 0 || (wx >> 5) >= blocksW || (wy >> 5) >= blocksH) {
-        return bg == 1 ? kWsTilemapUnavailable : kWsTilemapKeepWrapped;
-    }
+    if (wx < 0 || wy < 0 || (wx >> 5) >= blocksW || (wy >> 5) >= blocksH)
+        return kWsTilemapVoid;
 
     // sub_08001800 / sub_08001994 (cvaos code_08001194.c).
     const int tileX = wx >> 3;
@@ -215,7 +259,7 @@ int HandheldView::ProvideTilemapEntry(int bg, int hw_x, int screen_y, uint16_t* 
     const size_t blockIdx = static_cast<size_t>(tileX >> 2) +
                             static_cast<size_t>(tileY >> 2) * static_cast<size_t>(blocksW);
     const uint8_t* blockMap = Resolve(Rd32(meta + 0x0C), (blockIdx + 1) * 2);
-    if (!blockMap) return kWsTilemapKeepWrapped;
+    if (!blockMap) return kWsTilemapVoid;
     const uint16_t block = Rd16(blockMap + blockIdx * 2);
     const uint16_t flags = block & 0xC000;
     uint16_t id = block & 0x3FFF;
@@ -237,7 +281,7 @@ int HandheldView::ProvideTilemapEntry(int bg, int hw_x, int screen_y, uint16_t* 
         const uint32_t base = bg == 1 ? kBg1Metatiles : kOtherMetatiles;
         if (base + (cell + 1) * 2 <= m_ewramSize) table = m_ewram + base;
     }
-    if (!table) return kWsTilemapKeepWrapped;
+    if (!table) return kWsTilemapVoid;
     *out_entry = static_cast<uint16_t>(((flags >> 12) << 8) ^ Rd16(table + cell * 2));
     return kWsTilemapReplace;
 }

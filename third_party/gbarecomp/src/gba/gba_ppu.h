@@ -240,14 +240,22 @@ private:
     uint16_t top_margin_dispcnt_ = 0;
     struct LineRegs {
         uint16_t dispcnt = 0;
+        uint8_t oam_idx = 0;  // OAM / palette snapshot this line displays
+        uint8_t pal_idx = 0;
         std::array<uint8_t, 0x60> io{};
     };
     struct AsyncFrame {
         std::array<LineRegs, kScreenHeight> lines{};
         std::array<uint8_t, 96u * 1024u> vram{};
-        std::array<uint8_t, 1024u> oam{};
-        std::array<uint8_t, 1024u> pal{};
-        uint32_t top = 0;  // rows above hardware line 0 in this frame
+        // OAM and palette as each line saw them: a new snapshot only when the
+        // guest changed them since the previous line (usually one per frame).
+        std::array<std::array<uint8_t, 1024u>, kScreenHeight> oams{};
+        std::array<std::array<uint8_t, 1024u>, kScreenHeight> pals{};
+        uint32_t oam_count = 0;
+        uint32_t pal_count = 0;
+        uint32_t top = 0;    // rows above hardware line 0 in this frame
+        uint32_t width = 0;  // render width (pixels) of this frame
+        uint32_t left = 0;   // margin columns left of hardware column 0
     };
     bool async_ = false;
     bool async_busy_ = false;
@@ -274,11 +282,15 @@ private:
 // runtime-side sidecar; nullptr = vanilla wide behavior.
 // Result 0 means no authored continuation, 1 replaces the wrapped hardware
 // entry through out_entry, and 2 explicitly accepts the wrapped entry for a
-// deliberately tiled effect rather than room geometry.
+// deliberately tiled effect rather than room geometry. 3 marks a sample the
+// layer has no authored content for (outside what the game can ever show):
+// the layer is drawn opaque black there, at its own priority, so neither the
+// wrapped hardware ring nor the layers behind it leak into the margin.
 enum WsTilemapProviderResult : int {
     kWsTilemapUnavailable = 0,
     kWsTilemapReplace = 1,
     kWsTilemapKeepWrapped = 2,
+    kWsTilemapVoid = 3,
 };
 extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
                                         uint16_t* out_entry);

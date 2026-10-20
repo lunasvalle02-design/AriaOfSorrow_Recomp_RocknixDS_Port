@@ -21,5 +21,7 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$WIN_ROOT:/src" -v aria-build:/build \
   ${DUMP_IO:+-e GBARECOMP_DUMP_IO=1} \
   ${DUMP_MEM:+-e GBARECOMP_DUMP_MEM=1} \
   ${SPLIT:+-e ARIA_DEBUG_SPLIT_TOP=$SPLIT} \
+  ${LAYERS:+-e ARIA_DEBUG_LAYERS=1} \
+  ${ASYNC:+-e GBARECOMP_ASYNC_PPU=$ASYNC} \
   aria-rocknix-build bash /src/tools/docker/run-host.sh --no-window --frames "$FRAMES" "$@" 2>&1 | grep -v "^\s*bridged\|self_heal\|jump-table\|interpreter bridged" | tail -${TAILN:-6}
 ls "$ROOT/out/frames" | wc -l

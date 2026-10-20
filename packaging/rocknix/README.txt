@@ -13,10 +13,15 @@ Instalación
 
 Pantallas
 ---------
-- Superior: el juego en 4:3 (240x180). Las filas extra arriba y abajo son
-  escenario y enemigos reales de la sala, no relleno.
+- Superior: el juego en 4:3 (240x180, o 256x192 en AJUSTES > Formato). Las
+  filas y columnas extra son escenario y enemigos reales de la sala, no
+  relleno. Solo se muestra lo que la cámara del juego puede llegar a enseñar:
+  en salas de una sola pantalla de alto (muchos pasillos) no hay filas extra
+  y quedan franjas negras.
 - Inferior: estado (vida, magia, nivel, oro...), mapa en tiempo real y
-  ajustes. Se maneja tocando la pantalla.
+  ajustes. Se maneja tocando la pantalla (el táctil se asocia a todo el
+  escritorio de sway, como hace RetroArch en ROCKNIX, para que la calibración
+  de ROCKNIX lo lleve al panel inferior; ARIA_DS_TOUCH_OUTPUT lo cambia).
 
 Controles
 ---------

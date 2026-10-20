@@ -1585,10 +1585,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         args.view_width = static_cast<int>(ppu.render_width());
         args.view_height = static_cast<int>(ppu.render_height());
         // Off-thread composition: windowed sessions of games that ask for it
-        // (headless captures stay synchronous and exact).
-        if (opts.async_ppu && args.window &&
-            !(std::getenv("GBARECOMP_ASYNC_PPU") &&
-              std::getenv("GBARECOMP_ASYNC_PPU")[0] == '0')) {
+        // (headless captures stay synchronous and exact unless
+        // GBARECOMP_ASYNC_PPU=1 forces it, for testing; =0 always disables).
+        const char* async_env = std::getenv("GBARECOMP_ASYNC_PPU");
+        if ((opts.async_ppu && args.window && !(async_env && async_env[0] == '0')) ||
+            (async_env && async_env[0] == '1')) {
             ppu.set_async_render(true);
             std::fprintf(stderr, "[gbarecomp:runtime] async PPU composition ON\n");
         }
