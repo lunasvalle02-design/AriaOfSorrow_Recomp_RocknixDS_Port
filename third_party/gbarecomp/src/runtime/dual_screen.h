@@ -9,7 +9,7 @@
 // Panel rectangles come from, in order of preference:
 //   1. ARIA_DS_GAME_RECT / ARIA_DS_AUX_RECT = "x,y,w,h" (window pixels),
 //   2. sway's output layout (`swaymsg -t get_outputs`), with the game panel
-//      named by ARIA_DS_GAME_OUTPUT (default DSI-1, the RG DS top panel),
+//      named by ARIA_DS_GAME_OUTPUT (default DSI-2, the RG DS top panel; DSI-1 is the touch panel),
 //   3. a geometric split of the drawable (side by side or stacked halves).
 // `swap` exchanges the two panels at presentation time.
 

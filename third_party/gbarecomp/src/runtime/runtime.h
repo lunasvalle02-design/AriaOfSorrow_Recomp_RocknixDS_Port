@@ -62,6 +62,10 @@ struct RunOptions {
     // Maximum logical height a game opts into (160 = faithful). Requested
     // through --view-height / GBARECOMP_VIEW_HEIGHT.
     std::uint16_t max_view_height = 160;
+    // Compose the 160 hardware lines on a worker thread (see
+    // GbaPpu::set_async_render). Windowed runs only; GBARECOMP_ASYNC_PPU=0
+    // turns it off for comparison.
+    bool async_ppu = false;
 
     // A separate extended-view policy for games whose logical width follows
     // the live host-window aspect ratio. This ceiling is deliberately not

@@ -686,6 +686,10 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
+    // Launchers redirect output to a log file; keep it line-buffered so a
+    // killed session still leaves a useful log behind.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::cout << "====================================================\n";
     std::cout << "  AriaRecomp - Modernized PC Port of Aria of Sorrow \n";
     std::cout << "====================================================\n";
@@ -938,6 +942,17 @@ int main(int argc, char* argv[]) {
         opts.max_view_width = static_cast<uint16_t>(handheldViewW);
         opts.widescreen_view_width = static_cast<uint16_t>(handheldViewW);
         opts.max_view_height = static_cast<uint16_t>(handheldViewH);
+        // Handhelds have spare cores and a slow core per thread: compose the
+        // frame on a worker (only applies when there are no extra columns).
+        opts.async_ppu = handheld.asyncRender;
+        if (!std::getenv("GBARECOMP_AUDIO_TARGET_MS")) {
+            const std::string ms = std::to_string(handheld.audioLatencyMs);
+#if defined(_WIN32)
+            _putenv_s("GBARECOMP_AUDIO_TARGET_MS", ms.c_str());
+#else
+            setenv("GBARECOMP_AUDIO_TARGET_MS", ms.c_str(), 1);
+#endif
+        }
         aria::graphics::HandheldView::Get().SetRomData(g_romBuffer.data(), g_romBuffer.size());
 #if defined(GBARECOMP_RUNTIME_UI)
         aria::handheld::SetRomData(g_romBuffer.data(), g_romBuffer.size());

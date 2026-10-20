@@ -15,7 +15,7 @@ de antemano, así que en la consola se ejecuta código ARM64 nativo, sin emulado
 
 | | |
 |---|---|
-| **Dos pantallas reales** | Una ventana ocupa las dos salidas de sway (`DSI-1` arriba): el juego se dibuja en el panel superior y la interfaz en el inferior. |
+| **Dos pantallas reales** | Una ventana ocupa las dos salidas de sway: el juego se dibuja en el panel superior (`DSI-2`) y la interfaz en el inferior táctil (`DSI-1`, al que se mapea el táctil). |
 | **Pantalla superior en 4:3 de verdad** | El juego se renderiza a **240×180** en lugar de 240×160. Las 20 filas extra no son relleno: salen del mapa de bloques real de la sala, con todas sus capas, y los sprites que el juego ya mantiene vivos fuera de su cámara (enemigos, proyectiles, objetos) aparecen en esas franjas en vez de entrar de golpe. |
 | **Cámara 4:3 ajustada a la sala** | Las filas extra se reparten cada fotograma entre arriba y abajo para no salirse de la zona dibujada de la sala (en salas verticales, junto al techo o al suelo, toda la ampliación pasa al otro lado). Menús, mapa del juego y escenas: bandas negras. |
 | **Pantalla inferior** | Pestañas táctiles **ESTADO** (vida, magia, nivel, EXP, oro, atributos, último enemigo y si tienes su alma, y el mapa en tiempo real alrededor del jugador), **MAPA** (castillo completo o ampliado; toca para cambiar) y **AJUSTES**. |
@@ -33,6 +33,21 @@ de antemano, así que en la consola se ejecuta código ARM64 nativo, sin emulado
 
 Controles: los de la GBA. Menú completo (estados de guardado, trucos, opciones):
 **L + R + Start**, L3/R3 o la tecla de función, o *Más opciones* en AJUSTES.
+**Salir del juego: L1 + Start + Select** (la partida en SRAM se guarda al salir).
+
+### Rendimiento
+
+- La composición de la imagen se hace en otro núcleo del RK3568 mientras el
+  juego avanza al siguiente fotograma (`asyncRender`, un fotograma de latencia).
+- El compositor de líneas trabaja por tiles (≈27 % menos de tiempo por línea,
+  resultado idéntico píxel a píxel).
+- La pantalla inferior se redibuja a 20 Hz desde una textura en caché (al
+  instante al tocarla).
+- Colchón de audio de 100 ms (`audioLatencyMs`) para que un fotograma lento no
+  provoque chasquidos.
+
+Si algún efecto gráfico se viera mal, pon `asyncRender = false` en la sección
+`[Handheld]` de `aria_config.ini`.
 
 ## Compilar
 

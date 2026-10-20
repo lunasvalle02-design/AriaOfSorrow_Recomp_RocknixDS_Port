@@ -31,9 +31,9 @@ if [ -z "$SDL_GAMECONTROLLERCONFIG" ]; then
 fi
 
 # Under sway both panels are separate outputs; the game spans them with one
-# window and draws the game on DSI-1 (top) and the map/status/menu on the
-# other. Override with ARIA_DS_GAME_OUTPUT if your panels are named otherwise.
-export ARIA_DS_GAME_OUTPUT="${ARIA_DS_GAME_OUTPUT:-DSI-1}"
+# window and draws the game on DSI-2 (top) and the map/status/menu on the
+# touch panel DSI-1. Override with ARIA_DS_GAME_OUTPUT if your panels are named otherwise.
+export ARIA_DS_GAME_OUTPUT="${ARIA_DS_GAME_OUTPUT:-DSI-2}"
 if [ -n "$SWAYSOCK" ] || [ -n "$WAYLAND_DISPLAY" ]; then
   export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-wayland}"
 fi

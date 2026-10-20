@@ -19,8 +19,12 @@
 #pragma once
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <cstddef>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
@@ -42,6 +46,8 @@ public:
 
     GbaPpu();
     ~GbaPpu();
+    GbaPpu(const GbaPpu&) = delete;
+    GbaPpu& operator=(const GbaPpu&) = delete;
 
     // Events that fired during a tick. The caller routes these to
     // the IRQ controller (gating on the DISPSTAT enable bits the BIOS
@@ -173,6 +179,22 @@ public:
     const uint8_t* latched_framebuffer() const { return latched_fb_.data(); }
     bool has_latched_framebuffer() const { return has_latched_fb_; }
 
+    // ── Off-thread composition (presentation only; default OFF) ──────────
+    // When on, each visible line only records its registers; at VBlank start
+    // the frame's VRAM/OAM/PAL are snapshotted and a worker thread composes
+    // the 160 hardware lines while the guest runs the next frame (one frame
+    // of presentation latency). Rows outside 0-159 are still composed on the
+    // guest thread at line 159, since game policy hooks read live state for
+    // them. Mid-frame VRAM/OAM/PAL writes are not reproduced, so this is an
+    // opt-in for weak multi-core hosts. Only used with no horizontal margins.
+    void set_async_render(bool enabled);
+    bool async_render() const { return async_; }
+    // Copies the newest complete frame (render_bytes()) under the latch lock.
+    // Prefer this over latched_framebuffer() whenever async may be on.
+    bool copy_latched_framebuffer(uint8_t* dst) const;
+    // Blocks until the worker has published every submitted frame.
+    void wait_async_idle() const;
+
 private:
     uint32_t scanline_        = 0;   // 0..227
     uint32_t dot_in_scanline_ = 0;   // 0..307 (in dots, not cycles)
@@ -216,6 +238,31 @@ private:
     // above line 0; captured when line 0 renders.
     std::array<uint8_t, 0x60> top_margin_io_{};
     uint16_t top_margin_dispcnt_ = 0;
+    struct LineRegs {
+        uint16_t dispcnt = 0;
+        std::array<uint8_t, 0x60> io{};
+    };
+    struct AsyncFrame {
+        std::array<LineRegs, kScreenHeight> lines{};
+        std::array<uint8_t, 96u * 1024u> vram{};
+        std::array<uint8_t, 1024u> oam{};
+        std::array<uint8_t, 1024u> pal{};
+        uint32_t top = 0;  // rows above hardware line 0 in this frame
+    };
+    bool async_ = false;
+    bool async_busy_ = false;
+    bool async_quit_ = false;
+    std::unique_ptr<AsyncFrame> async_capture_;  // being filled by the guest
+    std::unique_ptr<AsyncFrame> async_job_;      // owned by the worker
+    std::array<uint8_t, kMaxFramebufferBytes> async_fb_{};  // worker target
+    const uint8_t* async_vram_ = nullptr;
+    const uint8_t* async_oam_ = nullptr;
+    const uint8_t* async_pal_ = nullptr;
+    std::thread async_thread_;
+    mutable std::mutex async_mutex_;
+    mutable std::condition_variable async_cv_;
+    void async_worker();
+    void stop_async();
     void render_vertical_margins(uint16_t dispcnt_bottom,
                                  const uint8_t* io_bottom,
                                  const uint8_t* vram,

@@ -198,6 +198,10 @@ struct HandheldConfig {
     bool swapScreens = false;           // game on the bottom panel
     int mapZoom = 1;                    // 0 = whole castle, 1 = around the player
     bool showFps = false;
+    // Compose the picture on a second CPU core (one frame of latency).
+    bool asyncRender = true;
+    // Extra audio buffering in milliseconds (absorbs slow frames).
+    int audioLatencyMs = 100;
 };
 
 struct PathsConfig {

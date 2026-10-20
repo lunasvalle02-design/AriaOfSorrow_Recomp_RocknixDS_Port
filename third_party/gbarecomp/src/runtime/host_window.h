@@ -169,3 +169,5 @@ private:
 extern "C" void gbarecomp_runtime_ui_open();
 // Asks the run loop to exit as if the window had been closed.
 extern "C" void gbarecomp_request_quit();
+// Game frames presented per second (0 before the first measurement).
+extern "C" float gbarecomp_present_fps();

@@ -1584,6 +1584,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         args.view_width = static_cast<int>(ppu.render_width());
         args.view_height = static_cast<int>(ppu.render_height());
+        // Off-thread composition: windowed sessions of games that ask for it
+        // (headless captures stay synchronous and exact).
+        if (opts.async_ppu && args.window &&
+            !(std::getenv("GBARECOMP_ASYNC_PPU") &&
+              std::getenv("GBARECOMP_ASYNC_PPU")[0] == '0')) {
+            ppu.set_async_render(true);
+            std::fprintf(stderr, "[gbarecomp:runtime] async PPU composition ON\n");
+        }
         g_ws_extra_left  = static_cast<unsigned>(ppu.view_extra_left());
         g_ws_extra_right = static_cast<unsigned>(ppu.view_extra_right());
         // Legacy single-margin consumers use the larger side for odd widths so
@@ -3316,9 +3324,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                          fast_forward_multiplier) == 0);
                 if (present_frame) {
                     const bool view_changed = sync_resize_driven_view();
-                    if (ppu.has_latched_framebuffer() && !view_changed) {
-                        std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
-                                    ppu.render_bytes());
+                    if (!view_changed &&
+                        ppu.copy_latched_framebuffer(live_fb.data())) {
+                        // Newest complete frame (published by the async
+                        // compositor when that is on).
                     } else {
                         ppu.render(live_fb.data(), bus.io().read16(0x000),
                                    bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
@@ -3764,9 +3773,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                          fast_forward_multiplier) == 0);
                 if (present_frame) {
                     const bool view_changed = sync_resize_driven_view();
-                    if (ppu.has_latched_framebuffer() && !view_changed) {
-                        std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
-                                    ppu.render_bytes());
+                    if (!view_changed &&
+                        ppu.copy_latched_framebuffer(live_fb.data())) {
+                        // Newest complete frame (published by the async
+                        // compositor when that is on).
                     } else {
                         ppu.render(live_fb.data(), bus.io().read16(0x000),
                                    bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
@@ -3907,6 +3917,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             ws_sidecar_active_fill();
             fresh = true;
         }
+        ppu.wait_async_idle();
         if (ppu.has_latched_framebuffer() && !fresh) {
             std::memcpy(fb.data(), ppu.latched_framebuffer(), fb.size());
         } else {

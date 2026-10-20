@@ -3,7 +3,9 @@
 ## 1. Presentación en dos paneles
 
 En ROCKNIX la RG DS / RG DS Plus ejecuta **sway**, y cada panel es una salida
-Wayland (`DSI-1` es el superior). El port no usa dos ventanas: abre **una
+Wayland: **`DSI-2` es el superior y `DSI-1` el inferior táctil** (pantalla Goodix;
+así lo configura la `sway-config.theme` de ROCKNIXDS). Al arrancar, el táctil
+se mapea al panel de la interfaz con `input type:touch map_to_output`. El port no usa dos ventanas: abre **una
 ventana sin bordes** y, al arrancar, le pide a sway `fullscreen enable global`
 (pantalla completa repartida entre todas las salidas) mediante una regla
 `for_window [pid=…]` y una orden directa.
@@ -13,7 +15,7 @@ cada panel por este orden:
 
 1. `ARIA_DS_GAME_RECT` / `ARIA_DS_AUX_RECT` = `x,y,w,h` (píxeles de ventana).
 2. `swaymsg -t get_outputs -r`: el panel del juego es `ARIA_DS_GAME_OUTPUT`
-   (por defecto `DSI-1`) y el otro es el auxiliar; se calculan relativos al
+   (por defecto `DSI-2`) y el otro es el auxiliar; se calculan relativos al
    rectángulo que engloba todas las salidas.
 3. Si no hay sway: la ventana se parte por la mitad (en horizontal si es más
    ancha que ~5:3, apilada en vertical si no).
@@ -124,14 +126,40 @@ cargada con `GBARECOMP_UI_FONT`).
   Si se cae en una dirección no traducida (prácticamente solo tras cargar un
   estado guardado a mitad de una función), la ejecuta el intérprete.
 
+## 6. Rendimiento
+
+Medido en PC (3000 fotogramas, sin ventana): componer las 160 líneas era la
+mitad del tiempo total. Cambios, todos con salida idéntica píxel a píxel
+(comprobado con 99 fotogramas en ambos modos):
+
+- **Compositor por tiles**: la entrada del mapa, volteos, banco de paleta y fila
+  del tile se resuelven una vez cada 8 px; la ventana de capas, una vez por
+  línea. 8,7 → 6,3 µs por línea.
+- **Las 160 líneas nativas por el compositor original** cuando no hay columnas
+  extra; el compositor ancho solo para las 20 filas de margen, con caché por
+  tile de las consultas al mapa de la sala.
+- **Composición asíncrona** (`GbaPpu::set_async_render`, `RunOptions::async_ppu`,
+  `[Handheld] asyncRender`): cada línea solo guarda sus registros; al empezar el
+  VBlank se copian VRAM/OAM/PAL y otro hilo compone el fotograma. Las filas de
+  margen se siguen componiendo en el hilo del juego en la línea 159 (consultan
+  estado vivo). No reproduce escrituras a VRAM/OAM/PAL a mitad de fotograma.
+- **Pantalla inferior a 20 Hz** desde una textura en caché
+  (`GBARECOMP_AUX_UI_DIVIDER`, por defecto 3).
+- **Audio**: colchón de 100 ms (`[Handheld] audioLatencyMs`,
+  `GBARECOMP_AUDIO_TARGET_MS`).
+
+Lo que queda en el hilo del juego es el propio código recompilado y la
+contabilidad de ciclos del runtime (≈10 % de las instrucciones), que es parte
+del núcleo de emulación y no se ha tocado.
+
 ## Pendiente de verificar en el dispositivo
 
 Nada de esto se ha podido comprobar sin una RG DS Plus:
 
-1. **Nombres y disposición de las salidas de sway.** Si el juego sale en el
-   panel equivocado, usa *Pantalla del juego → Inferior* o exporta
-   `ARIA_DS_GAME_OUTPUT=<nombre>` en el lanzador (`swaymsg -t get_outputs` lo
-   muestra).
+1. **Nombres de las salidas de sway.** Corregido a `DSI-2` (arriba) tras la
+   primera prueba en la consola. Si aun así sale al revés, usa *Pantalla del
+   juego → Inferior* o exporta `ARIA_DS_GAME_OUTPUT=<nombre>` en el lanzador; el
+   `log.txt` muestra las salidas que detecta.
 2. **`fullscreen enable global`** con la configuración de sway de ROCKNIX. Si la
    ventana no se extiende a los dos paneles, fija los rectángulos con
    `ARIA_DS_WINDOW`, `ARIA_DS_GAME_RECT` y `ARIA_DS_AUX_RECT`.

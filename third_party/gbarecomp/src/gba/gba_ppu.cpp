@@ -3,6 +3,7 @@
 #include "gba_ppu.h"
 #include "foreign_presentation_internal.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -84,9 +85,51 @@ void clear() {
 }  // namespace foreign_presentation_internal
 
 GbaPpu::GbaPpu()  = default;
-GbaPpu::~GbaPpu() = default;
+GbaPpu::~GbaPpu() { stop_async(); }
+
+void GbaPpu::set_async_render(bool enabled) {
+    if (enabled == async_) return;
+    if (!enabled) {
+        stop_async();
+        return;
+    }
+    async_capture_ = std::make_unique<AsyncFrame>();
+    async_job_ = std::make_unique<AsyncFrame>();
+    async_quit_ = false;
+    async_busy_ = false;
+    async_ = true;
+    async_thread_ = std::thread([this] { async_worker(); });
+}
+
+void GbaPpu::stop_async() {
+    if (!async_) return;
+    {
+        std::lock_guard<std::mutex> lk(async_mutex_);
+        async_quit_ = true;
+    }
+    async_cv_.notify_all();
+    if (async_thread_.joinable()) async_thread_.join();
+    async_ = false;
+    async_capture_.reset();
+    async_job_.reset();
+}
+
+void GbaPpu::wait_async_idle() const {
+    if (!async_) return;
+    std::unique_lock<std::mutex> lk(async_mutex_);
+    async_cv_.wait(lk, [this] { return !async_busy_ || async_quit_; });
+}
+
+bool GbaPpu::copy_latched_framebuffer(uint8_t* dst) const {
+    if (!dst) return false;
+    std::lock_guard<std::mutex> lk(async_mutex_);
+    if (!has_latched_fb_) return false;
+    std::memcpy(dst, latched_fb_.data(), render_bytes());
+    return true;
+}
 
 void GbaPpu::serialize(gbarecomp::debug::SnapshotWriter& w) const {
+    wait_async_idle();
     w.u32(scanline_);
     w.u32(dot_in_scanline_);
     w.u32(cycle_in_dot_);
@@ -116,6 +159,7 @@ void GbaPpu::serialize(gbarecomp::debug::SnapshotWriter& w) const {
 }
 
 void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
+    wait_async_idle();
     // Foreign presentation is intentionally not save-state data.  A selected
     // trusted mod must explicitly republish a newly valid buffer after load.
     foreign_presentation_internal::clear();
@@ -169,6 +213,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
 }
 
 void GbaPpu::reset() {
+    wait_async_idle();
     foreign_presentation_internal::clear();
     scanline_ = 0;
     dot_in_scanline_ = 0;
@@ -800,11 +845,16 @@ void render_scanline_internal(uint8_t* rgb,
             return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
         return static_cast<uint16_t>(winout & 0x3Fu);
     };
+    // Resolve the window region once per column; every later stage (each BG,
+    // every OBJ texel, blending) asks the same question for the same x.
+    uint8_t window_controls[GbaPpu::kScreenWidth];
+    for (uint32_t x = 0; x < kScreenWidth; ++x)
+        window_controls[x] = static_cast<uint8_t>(window_control(x) & 0x3Fu);
     auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
-        return (window_control(x) & (1u << layer_bit)) != 0;
+        return (window_controls[x] & (1u << layer_bit)) != 0;
     };
     auto blend_enabled = [&](uint32_t x) -> bool {
-        return (window_control(x) & (1u << 5)) != 0;
+        return (window_controls[x] & (1u << 5)) != 0;
     };
 
     uint16_t bldcnt = static_cast<uint16_t>(io[0x50] | (io[0x51] << 8));
@@ -822,6 +872,11 @@ void render_scanline_internal(uint8_t* rgb,
     PixelCandidate foreign_hud_bg[GbaPpu::kScreenWidth] = {};
     const GbaForeignObjFocusTransform* foreign_focus =
         foreign_presentation_internal::obj_focus();
+    // Validated once per line; without a published focus every per-sprite /
+    // per-pixel focus query below is a no-op.
+    const bool foreign_focus_valid = valid_foreign_obj_focus(foreign_focus);
+    const bool foreign_hud_capture =
+        foreign_focus_valid && foreign_focus->hud_bg_map_rect_count != 0;
     const uint16_t backdrop_color = load_u16_le(&pal[0]);
     uint8_t backdrop_rgb[3];
     to_rgb888(backdrop_color, backdrop_rgb);
@@ -842,9 +897,12 @@ void render_scanline_internal(uint8_t* rgb,
                       uint8_t layer,
                       bool target1,
                       bool target2) {
+        // Losing candidates are common (lower layers under opaque ones):
+        // reject them before building anything. The RGB888 form is derived
+        // from `color` only when the pixel is written out.
+        if (key >= second[x].key) return;
         PixelCandidate cand;
         cand.color = color;
-        to_rgb888(color, cand.rgb);
         cand.key = key;
         cand.layer = layer;
         cand.target1 = target1;
@@ -853,7 +911,7 @@ void render_scanline_internal(uint8_t* rgb,
         if (key < top[x].key) {
             second[x] = top[x];
             top[x] = cand;
-        } else if (key < second[x].key) {
+        } else {
             second[x] = cand;
         }
     };
@@ -882,61 +940,80 @@ void render_scanline_internal(uint8_t* rgb,
         uint32_t height_px = height_tiles * 8u;
         uint32_t block_cols = width_tiles / 32u;
 
-        for (uint32_t x = 0; x < kScreenWidth; ++x) {
-            if (!layer_enabled(x, layer)) continue;
-            uint32_t tex_x = (x + hofs) & (width_px - 1u);
-            uint32_t tex_y = (y + vofs) & (height_px - 1u);
-            uint32_t tile_x = tex_x >> 3;
-            uint32_t tile_y = tex_y >> 3;
-            uint32_t block = (tile_x >> 5) + (tile_y >> 5) * block_cols;
-            uint32_t map_off = screen_base + block * 0x800u +
-                ((tile_y & 31u) * 32u + (tile_x & 31u)) * 2u;
-            if (map_off + 1 >= 96u * 1024u) continue;
+        // Tile-span walk: everything that depends only on the map entry (map
+        // address, flips, palette bank, the tile's pixel row, the HUD filter)
+        // is resolved once per 8px tile instead of once per pixel. Per-pixel
+        // work is just the window test, the texel fetch and submit().
+        const uint32_t tex_y = (y + vofs) & (height_px - 1u);
+        const uint32_t tile_y = tex_y >> 3;
+        const uint32_t row_base = screen_base +
+            (tile_y >> 5) * block_cols * 0x800u + (tile_y & 31u) * 64u;
+        const int key = static_cast<int>(bg_priority * 256u + 128u + layer);
+        const bool layer_first = (first_targets & (1u << layer)) != 0;
+        const bool layer_second = (second_targets & (1u << layer)) != 0;
+        uint32_t x = 0;
+        while (x < kScreenWidth) {
+            const uint32_t tex_x0 = (x + hofs) & (width_px - 1u);
+            const uint32_t tile_x = tex_x0 >> 3;
+            const uint32_t span = std::min(8u - (tex_x0 & 7u), kScreenWidth - x);
+            const uint32_t x_end = x + span;
+            const uint32_t map_off = row_base + (tile_x >> 5) * 0x800u +
+                                     (tile_x & 31u) * 2u;
+            if (map_off + 1 >= 96u * 1024u) { x = x_end; continue; }
 
-            uint16_t entry = load_u16_le(&vram[map_off]);
-            uint32_t tile_num = entry & 0x03FFu;
-            bool hflip = (entry & 0x0400u) != 0;
-            bool vflip = (entry & 0x0800u) != 0;
-            uint32_t palette_bank = (entry >> 12) & 0x0Fu;
-            uint32_t px = tex_x & 7u;
-            uint32_t py = tex_y & 7u;
-            if (hflip) px = 7u - px;
-            if (vflip) py = 7u - py;
-
-            uint8_t pal_idx = 0;
-            if (color256) {
-                uint32_t tile_addr = char_base + tile_num * 64u + py * 8u + px;
-                if (tile_addr >= 96u * 1024u) continue;
-                pal_idx = vram[tile_addr];
-            } else {
-                uint32_t tile_addr = char_base + tile_num * 32u +
-                    py * 4u + (px >> 1);
-                if (tile_addr >= 96u * 1024u) continue;
-                uint8_t packed = vram[tile_addr];
-                pal_idx = (px & 1u) ? (packed >> 4) : (packed & 0x0Fu);
-                pal_idx = static_cast<uint8_t>(
-                    pal_idx | static_cast<uint8_t>(palette_bank << 4));
+            const uint16_t entry = load_u16_le(&vram[map_off]);
+            // Presentation filter (null in faithful sessions).
+            if (g_ws_bg_entry_filter &&
+                g_ws_bg_entry_filter(static_cast<int>(layer), tile_x, tile_y,
+                                     entry)) {
+                x = x_end;
+                continue;
             }
-            if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
+            const uint32_t tile_num = entry & 0x03FFu;
+            const bool hflip = (entry & 0x0400u) != 0;
+            const bool vflip = (entry & 0x0800u) != 0;
+            const uint32_t palette_bank = (entry >> 12) & 0x0Fu;
+            const uint32_t py = vflip ? 7u - (tex_y & 7u) : (tex_y & 7u);
+            const uint32_t tile_row = color256
+                ? char_base + tile_num * 64u + py * 8u
+                : char_base + tile_num * 32u + py * 4u;
 
-            const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
-            if (foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
-                                            tile_y, x, y)) {
-                PixelCandidate& hud = foreign_hud_bg[x];
-                hud.color = color;
-                to_rgb888(color, hud.rgb);
-                hud.key = static_cast<int>(bg_priority * 256u + 128u + layer);
-                hud.layer = static_cast<uint8_t>(layer);
-                hud.target1 = blend_enabled(x) &&
-                    ((first_targets & (1u << layer)) != 0);
-                hud.target2 = (second_targets & (1u << layer)) != 0;
-                hud.valid = true;
+            for (uint32_t px0 = tex_x0 & 7u; x < x_end; ++x, ++px0) {
+                if (!layer_enabled(x, layer)) continue;
+                const uint32_t px = hflip ? 7u - px0 : px0;
+                uint8_t pal_idx = 0;
+                if (color256) {
+                    const uint32_t tile_addr = tile_row + px;
+                    if (tile_addr >= 96u * 1024u) continue;
+                    pal_idx = vram[tile_addr];
+                    if (pal_idx == 0) continue;
+                } else {
+                    const uint32_t tile_addr = tile_row + (px >> 1);
+                    if (tile_addr >= 96u * 1024u) continue;
+                    const uint8_t packed = vram[tile_addr];
+                    pal_idx = (px & 1u) ? (packed >> 4) : (packed & 0x0Fu);
+                    if (pal_idx == 0) continue;
+                    pal_idx = static_cast<uint8_t>(
+                        pal_idx | static_cast<uint8_t>(palette_bank << 4));
+                }
+
+                const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+                const bool t1 = blend_enabled(x) && layer_first;
+                if (foreign_hud_capture &&
+                    foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
+                                                tile_y, x, y)) {
+                    PixelCandidate& hud = foreign_hud_bg[x];
+                    hud.color = color;
+                    to_rgb888(color, hud.rgb);
+                    hud.key = key;
+                    hud.layer = static_cast<uint8_t>(layer);
+                    hud.target1 = t1;
+                    hud.target2 = layer_second;
+                    hud.valid = true;
+                }
+                submit(x, color, key, static_cast<uint8_t>(layer), t1,
+                       layer_second);
             }
-            submit(x, color,
-                   static_cast<int>(bg_priority * 256u + 128u + layer),
-                   static_cast<uint8_t>(layer),
-                   blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
-                   (second_targets & (1u << layer)) != 0);
         }
     };
 
@@ -1180,6 +1257,8 @@ void render_scanline_internal(uint8_t* rgb,
             int sx = static_cast<int>(attr1 & 0x1FFu);
             if (sy >= 160) sy -= 256;
             if (sx & 0x100) sx -= 0x200;
+            if (g_ws_obj_filter && g_ws_obj_filter(idx, attr0, attr1, attr2))
+                continue;
             bool color256 = (attr0 & 0x2000u) != 0;
             uint32_t tile_num = attr2 & 0x3FFu;
             if (bg_mode >= 3 && tile_num < 512u) continue;
@@ -1236,7 +1315,8 @@ void render_scanline_internal(uint8_t* rgb,
             if (rot_scale) {
                 int bw = disable_or_double ? sw * 2 : sw;
                 int bh = disable_or_double ? sh * 2 : sh;
-                if (apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
+                if (foreign_focus_valid &&
+                    apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
                                             false, static_cast<uint32_t>(idx)).action ==
                     ForeignObjFocusAction::kSuppress) continue;
                 int j = static_cast<int>(y) - sy;
@@ -1262,9 +1342,10 @@ void render_scanline_internal(uint8_t* rgb,
                 }
                 continue;
             }
-            const ForeignObjFocusResult focus_result =
-                apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num, true,
-                                        static_cast<uint32_t>(idx));
+            const ForeignObjFocusResult focus_result = foreign_focus_valid
+                ? apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num, true,
+                                          static_cast<uint32_t>(idx))
+                : ForeignObjFocusResult{};
             if (focus_result.action == ForeignObjFocusAction::kSuppress) continue;
             const int draw_w = scaled_extent(sw, focus_result.scale_q8_8);
             const int draw_h = scaled_extent(sh, focus_result.scale_q8_8);
@@ -1314,9 +1395,7 @@ void render_scanline_internal(uint8_t* rgb,
                 : darken_gba555(top[x].color, bldy);
             to_rgb888(adjusted, dst);
         } else {
-            dst[0] = top[x].rgb[0];
-            dst[1] = top[x].rgb[1];
-            dst[2] = top[x].rgb[2];
+            to_rgb888(top[x].color, dst);
         }
     }
     return;
@@ -1509,6 +1588,10 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
         uint32_t width_px = width_tiles * 8u;
         uint32_t height_px = height_tiles * 8u;
         uint32_t block_cols = width_tiles / 32u;
+        // Provider results only change per 8px tile: memoize the last one.
+        int memo_tile = INT32_MIN;
+        int memo_action = 0;
+        uint16_t memo_entry = 0;
         for (uint32_t x = 0; x < out_w; ++x) {
             int hx = static_cast<int>(x) - static_cast<int>(ox);
             const bool authored_margin = g_ws_authored_margin_layers &&
@@ -1564,10 +1647,16 @@ void render_scanline_wide(uint8_t* rgb, int y, uint32_t out_row,
             // wrap. With no sidecar, keep vanilla wide behavior.
             if (sample_hx < 0 || sample_hx >= 240 || vertical_margin) {
                 if (g_ws_tilemap_provider) {
-                    uint16_t ext;
-                    const int action = g_ws_tilemap_provider(
-                        static_cast<int>(layer), sample_hx,
-                        static_cast<int>(y), &ext);
+                    const int tile_key =
+                        (sample_hx + static_cast<int>(hofs)) >> 3;
+                    if (tile_key != memo_tile) {
+                        memo_tile = tile_key;
+                        memo_action = g_ws_tilemap_provider(
+                            static_cast<int>(layer), sample_hx,
+                            static_cast<int>(y), &memo_entry);
+                    }
+                    const int action = memo_action;
+                    const uint16_t ext = memo_entry;
                     if (action == kWsTilemapReplace) {
                         entry = ext;
                     } else if (action != kWsTilemapKeepWrapped) {
@@ -2396,9 +2485,26 @@ void GbaPpu::render_scanline(uint32_t y,
         top_margin_dispcnt_ = dispcnt;
     }
     const uint32_t bottom = extra_top_ + extra_bottom_ - active_top_;
-    render_scanline_wide(work_fb_.data(), static_cast<int>(y),
-                         y + active_top_, dispcnt, affine_io.data(),
-                         vram, oam, pal, render_width(), extra_left_, bottom);
+    if (async_ && (extra_left_ | extra_right_) == 0) {
+        // Record only; the worker composes this line after VBlank.
+        LineRegs& line = async_capture_->lines[y];
+        line.dispcnt = dispcnt;
+        std::memcpy(line.io.data(), affine_io.data(), line.io.size());
+        async_vram_ = vram;
+        async_oam_ = oam;
+        async_pal_ = pal;
+    } else if ((extra_left_ | extra_right_) == 0) {
+        // Vertical-only expansion: the 160 hardware lines are exactly the
+        // native scanlines, so they take the (much cheaper) native compositor
+        // into the shifted rows; only the margin rows need the wide path.
+        render_scanline_internal(work_fb_.data() + active_top_ * kScreenWidth * 3u,
+                                 y, dispcnt, affine_io.data(), vram, oam, pal,
+                                 kScreenWidth, kScreenHeight);
+    } else {
+        render_scanline_wide(work_fb_.data(), static_cast<int>(y),
+                             y + active_top_, dispcnt, affine_io.data(),
+                             vram, oam, pal, render_width(), extra_left_, bottom);
+    }
     if (y + 1 == kScreenHeight && (extra_top_ | extra_bottom_) != 0) {
         render_vertical_margins(dispcnt, affine_io.data(), vram, oam, pal);
     }
@@ -2421,8 +2527,63 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
 }
 
 void GbaPpu::mark_framebuffer_latched() {
+    if (async_ && async_vram_ && async_oam_ && async_pal_ &&
+        (extra_left_ | extra_right_) == 0) {
+        // VBlank start: the VRAM/OAM/PAL the frame was displayed with (the
+        // game's own VBlank uploads have not run yet). The margin rows were
+        // already composed into work_fb_ at line 159.
+        AsyncFrame& f = *async_capture_;
+        std::memcpy(f.vram.data(), async_vram_, f.vram.size());
+        std::memcpy(f.oam.data(), async_oam_, f.oam.size());
+        std::memcpy(f.pal.data(), async_pal_, f.pal.size());
+        f.top = active_top_;
+        std::unique_lock<std::mutex> lk(async_mutex_);
+        // Back-pressure: never drop a frame, wait for the previous one.
+        async_cv_.wait(lk, [this] { return !async_busy_; });
+        const std::size_t stride = static_cast<std::size_t>(render_width()) * 3u;
+        const std::size_t margin_top = static_cast<std::size_t>(active_top_) * stride;
+        const std::size_t native_end =
+            static_cast<std::size_t>(active_top_ + kScreenHeight) * stride;
+        // Margin rows travel with the job so the worker publishes a coherent
+        // frame.
+        std::memcpy(async_fb_.data(), work_fb_.data(), margin_top);
+        std::memcpy(async_fb_.data() + native_end, work_fb_.data() + native_end,
+                    render_bytes() - native_end);
+        std::swap(async_capture_, async_job_);
+        async_busy_ = true;
+        lk.unlock();
+        async_cv_.notify_all();
+        return;
+    }
+    std::lock_guard<std::mutex> lk(async_mutex_);
     std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
     has_latched_fb_ = true;
+}
+
+void GbaPpu::async_worker() {
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(async_mutex_);
+            async_cv_.wait(lk, [this] { return async_busy_ || async_quit_; });
+            if (async_quit_) return;
+        }
+        const AsyncFrame& f = *async_job_;
+        uint8_t* rows = async_fb_.data() +
+                        static_cast<std::size_t>(f.top) * kScreenWidth * 3u;
+        for (uint32_t y = 0; y < kScreenHeight; ++y) {
+            render_scanline_internal(rows, y, f.lines[y].dispcnt,
+                                     f.lines[y].io.data(), f.vram.data(),
+                                     f.oam.data(), f.pal.data(),
+                                     kScreenWidth, kScreenHeight);
+        }
+        {
+            std::lock_guard<std::mutex> lk(async_mutex_);
+            std::memcpy(latched_fb_.data(), async_fb_.data(), render_bytes());
+            has_latched_fb_ = true;
+            async_busy_ = false;
+        }
+        async_cv_.notify_all();
+    }
 }
 
 }  // namespace gba

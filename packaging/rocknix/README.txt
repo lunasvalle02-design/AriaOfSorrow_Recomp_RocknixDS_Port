@@ -21,6 +21,7 @@ Pantallas
 Controles
 ---------
 - Los botones del juego son los de la GBA (A, B, L, R, Start, Select).
+- Salir del juego: L1 + Start + Select.
 - Menú completo (opciones, guardar/cargar estados, trucos): L + R + Start,
   o L3 / R3 / tecla de función si la consola la tiene, o "Más opciones" en
   la pestaña AJUSTES de la pantalla inferior.

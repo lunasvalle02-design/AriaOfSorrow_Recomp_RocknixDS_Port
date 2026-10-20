@@ -29,6 +29,11 @@ int g_probe_window_h = 0;
 Rect g_last_game;
 Rect g_last_aux;
 bool g_last_valid = false;
+// sway output names of the two panels (empty without sway) and the swap state
+// the touchscreen mapping was last applied for (-1 = never).
+std::string g_game_output;
+std::string g_aux_output;
+int g_touch_swap_applied = -1;
 
 bool parse_rect(const char* text, Rect* out) {
     if (!text || !*text) return false;
@@ -159,7 +164,9 @@ void probe_sway() {
     if (active.size() < 2) return;
 
     const char* game_env = std::getenv("ARIA_DS_GAME_OUTPUT");
-    const std::string game_name = game_env && *game_env ? game_env : "DSI-1";
+    // ROCKNIX's RG DS / RG DS Plus sway setup names the top panel DSI-2 and
+    // the bottom (Goodix touch) panel DSI-1.
+    const std::string game_name = game_env && *game_env ? game_env : "DSI-2";
     size_t game_idx = 0;
     for (size_t i = 0; i < active.size(); ++i)
         if (active[i].name == game_name) game_idx = i;
@@ -179,6 +186,30 @@ void probe_sway() {
     g_probe_aux = rel(active[aux_idx].rect);
     g_probe_window_w = max_x - min_x;
     g_probe_window_h = max_y - min_y;
+    g_game_output = active[game_idx].name;
+    g_aux_output = active[aux_idx].name;
+    std::fprintf(stderr, "dual_screen: game panel %s, aux panel %s\n",
+                 g_game_output.c_str(), g_aux_output.c_str());
+#endif
+}
+
+// Keeps every touchscreen mapped to whichever panel shows the auxiliary UI
+// (the bottom panel unless the screens are swapped). Runs only on change.
+void sync_touch_mapping(bool swap) {
+#if !defined(_WIN32)
+    std::string target;
+    {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        if (g_game_output.empty() || g_touch_swap_applied == (swap ? 1 : 0)) return;
+        g_touch_swap_applied = swap ? 1 : 0;
+        target = swap ? g_game_output : g_aux_output;
+    }
+    if (std::getenv("ARIA_DS_NO_SWAYMSG")) return;
+    const std::string cmd = "swaymsg 'input type:touch map_to_output " + target +
+                            "' >/dev/null 2>&1";
+    std::system(cmd.c_str());
+#else
+    (void)swap;
 #endif
 }
 
@@ -213,6 +244,7 @@ void attach_to_compositor() {
         std::system(cmd);
     }
 #endif
+    sync_touch_mapping(config().swap);
 }
 
 void preferred_window_size(int* w, int* h) {
@@ -278,6 +310,7 @@ bool layout(int drawable_w, int drawable_h, Rect* game, Rect* aux) {
     g = scale(g);
     a = scale(a);
     if (cfg.swap) std::swap(g, a);
+    sync_touch_mapping(cfg.swap);
     if (game) *game = g;
     if (aux) *aux = a;
     std::lock_guard<std::mutex> lk(g_mutex);

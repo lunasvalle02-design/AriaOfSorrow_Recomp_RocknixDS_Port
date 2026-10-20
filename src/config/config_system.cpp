@@ -124,6 +124,8 @@ bool ConfigSystem::LoadFromFile(const std::string& configPath) {
                 else if (key == "swapScreens") m_config.handheld.swapScreens = (val == "true" || val == "1");
                 else if (key == "mapZoom") m_config.handheld.mapZoom = std::clamp(std::stoi(val), 0, 1);
                 else if (key == "showFps") m_config.handheld.showFps = (val == "true" || val == "1");
+                else if (key == "asyncRender") m_config.handheld.asyncRender = (val == "true" || val == "1");
+                else if (key == "audioLatencyMs") m_config.handheld.audioLatencyMs = std::clamp(std::stoi(val), 40, 250);
             } else if (currentSection == "Rewind") {
                 if (key == "enableRewind") m_config.rewind.enableRewind = (val == "true" || val == "1");
                 else if (key == "bufferDurationSeconds") m_config.rewind.bufferDurationSeconds = std::stoi(val);
@@ -209,6 +211,8 @@ bool ConfigSystem::SaveToFile(const std::string& configPath) const {
     file << "swapScreens = " << (m_config.handheld.swapScreens ? "true" : "false") << "\n";
     file << "mapZoom = " << m_config.handheld.mapZoom << "\n";
     file << "showFps = " << (m_config.handheld.showFps ? "true" : "false") << "\n";
+    file << "asyncRender = " << (m_config.handheld.asyncRender ? "true" : "false") << "\n";
+    file << "audioLatencyMs = " << m_config.handheld.audioLatencyMs << "\n";
 
     return true;
 }

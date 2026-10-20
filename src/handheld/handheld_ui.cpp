@@ -423,9 +423,9 @@ void RenderAuxScreen(const uint8_t* ewram, size_t ewramSize, uint64_t frame) {
             g_confirmQuit = false;
         }
         if (aria::config::ConfigSystem::Get().GetConfig().handheld.showFps) {
-            // Presented frames per second (the game targets 59.73).
+            // Game frames presented per second (the GBA runs at 59.73).
             char fps[32];
-            std::snprintf(fps, sizeof(fps), "%.1f FPS", ImGui::GetIO().Framerate);
+            std::snprintf(fps, sizeof(fps), "%.1f FPS", gbarecomp_present_fps());
             const ImVec2 p(pos.x + size.x - ImGui::CalcTextSize(fps).x - 10.0f * s,
                            pos.y + size.y - ImGui::GetFontSize() - 6.0f * s);
             ImGui::GetForegroundDrawList()->AddText(p, IM_COL32(120, 255, 120, 255), fps);

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -357,6 +358,14 @@ struct Backend {
     RecompRuntimeUi* runtime_ui = nullptr;
     ImGuiContext* runtime_imgui_context = nullptr;
     bool runtime_imgui_ready = false;
+    // Dual-screen: the auxiliary UI is rebuilt at a reduced rate into this
+    // cached render target and only blitted on the other presents.
+    SDL_Texture* aux_ui_cache = nullptr;
+    int aux_ui_cache_w = 0;
+    int aux_ui_cache_h = 0;
+    bool aux_ui_cache_valid = false;
+    bool aux_ui_dirty = true;
+    unsigned aux_ui_frame = 0;
     // A stationary long press opens the runtime menu. Its eventual FINGERUP
     // must not become a click on whichever menu row appeared under the finger.
     int runtime_ui_suppressed_touch_releases = 0;
@@ -1027,6 +1036,52 @@ void runtime_imgui_render(Backend* b) {
     SDL_RenderSetLogicalSize(b->renderer, 0, 0);
     SDL_RenderSetViewport(b->renderer, nullptr);
 
+    // Dual-screen second panel: status/map/menu do not need 60 Hz. Rebuild
+    // the ImGui frame every Nth present (or right after input) into a cached
+    // target and just blit it otherwise; this keeps ImGui's CPU cost off most
+    // frames of the emulation thread. The full settings menu stays live.
+    bool use_cache = false;
+    if (dual_screen::config().enabled && !ui_open) {
+        int out_w = 0, out_h = 0;
+        if (SDL_GetRendererOutputSize(b->renderer, &out_w, &out_h) == 0 &&
+            out_w > 0 && out_h > 0) {
+            if (!b->aux_ui_cache || b->aux_ui_cache_w != out_w ||
+                b->aux_ui_cache_h != out_h) {
+                if (b->aux_ui_cache) SDL_DestroyTexture(b->aux_ui_cache);
+                b->aux_ui_cache = SDL_CreateTexture(
+                    b->renderer, SDL_PIXELFORMAT_RGBA8888,
+                    SDL_TEXTUREACCESS_TARGET, out_w, out_h);
+                b->aux_ui_cache_w = out_w;
+                b->aux_ui_cache_h = out_h;
+                b->aux_ui_cache_valid = false;
+                if (b->aux_ui_cache)
+                    SDL_SetTextureBlendMode(b->aux_ui_cache, SDL_BLENDMODE_BLEND);
+            }
+            use_cache = b->aux_ui_cache != nullptr;
+        }
+    }
+    if (use_cache) {
+        static const unsigned kDivider = [] {
+            const char* e = std::getenv("GBARECOMP_AUX_UI_DIVIDER");
+            const int v = e ? std::atoi(e) : 3;
+            return static_cast<unsigned>(std::clamp(v, 1, 30));
+        }();
+        const bool refresh = !b->aux_ui_cache_valid || b->aux_ui_dirty ||
+                             (++b->aux_ui_frame % kDivider) == 0;
+        if (!refresh) {
+            SDL_RenderCopy(b->renderer, b->aux_ui_cache, nullptr, nullptr);
+            SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
+            SDL_RenderSetViewport(b->renderer, &viewport);
+            return;
+        }
+        if (SDL_SetRenderTarget(b->renderer, b->aux_ui_cache) != 0) {
+            use_cache = false;
+        } else {
+            SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 0);
+            SDL_RenderClear(b->renderer);
+        }
+    }
+
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
@@ -1054,6 +1109,12 @@ void runtime_imgui_render(Backend* b) {
     }
     ImGui::Render();
     ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), b->renderer);
+    if (use_cache) {
+        SDL_SetRenderTarget(b->renderer, nullptr);
+        SDL_RenderCopy(b->renderer, b->aux_ui_cache, nullptr, nullptr);
+        b->aux_ui_cache_valid = true;
+        b->aux_ui_dirty = false;
+    }
 
     SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
     SDL_RenderSetViewport(b->renderer, &viewport);
@@ -1428,6 +1489,12 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
             cfg.source_rate = 65536.0;                 // engine's standardized GBA mixer rate
             cfg.host_rate   = static_cast<double>(got.freq);
             cfg.target_ms   = 60.0;                     // steady cushion (matches NES)
+            // Slow handhelds trade a little latency for a cushion that rides
+            // out late frames without underrunning (audible crackle).
+            if (const char* t = std::getenv("GBARECOMP_AUDIO_TARGET_MS")) {
+                const double ms = std::atof(t);
+                if (ms >= 20.0 && ms <= 500.0) cfg.target_ms = ms;
+            }
             cfg.preroll_ms  = 250.0;                    // boot pre-roll: hide the cold-start
                                                         // recomp warm-up hitch (drains to target)
             if (rab_init(&b->bridge, &cfg) == 0) b->bridge_ready = true;
@@ -1611,6 +1678,8 @@ void HostWindow::close() {
     if (b->device_gyro) SDL_SensorClose(b->device_gyro);
 #if defined(GBARECOMP_RUNTIME_UI)
     runtime_imgui_shutdown(b);
+    if (b->aux_ui_cache) SDL_DestroyTexture(b->aux_ui_cache);
+    b->aux_ui_cache = nullptr;
 #endif
     destroy_sharp_texture(b);
     if (b->texture)   SDL_DestroyTexture(b->texture);
@@ -1702,9 +1771,27 @@ bool HostWindow::drawable_size(int* width, int* height) const {
            *width > 0 && *height > 0;
 }
 
+namespace {
+// Presents per second, measured over half-second windows (read by UI code).
+std::atomic<float> g_present_fps{0.0f};
+Uint32 g_present_fps_start = 0;
+int g_present_fps_count = 0;
+}  // namespace
+
 void HostWindow::present(const uint8_t* rgb888) {
     if (!open_ || !impl_ || !rgb888) return;
     auto* b = static_cast<Backend*>(impl_);
+    {
+        const Uint32 now = SDL_GetTicks();
+        if (g_present_fps_start == 0) g_present_fps_start = now;
+        ++g_present_fps_count;
+        if (now - g_present_fps_start >= 500) {
+            g_present_fps.store(g_present_fps_count * 1000.0f /
+                                static_cast<float>(now - g_present_fps_start));
+            g_present_fps_start = now;
+            g_present_fps_count = 0;
+        }
+    }
     // Present-time color grading (opt-in). Raw is passthrough: the raw
     // PPU frame is uploaded untouched, so verify/frame-hash are unaffected.
     if (b->color_lut && !b->color_lut->is_passthrough() &&
@@ -2113,6 +2200,15 @@ HostWindow::Events HostWindow::pump() {
         if (b->runtime_imgui_ready) {
             ImGui::SetCurrentContext(b->runtime_imgui_context);
             ImGui_ImplSDL2_ProcessEvent(&e);
+            switch (e.type) {
+                case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP:
+                case SDL_MOUSEMOTION: case SDL_FINGERDOWN: case SDL_FINGERUP:
+                case SDL_KEYDOWN: case SDL_CONTROLLERBUTTONDOWN:
+                case SDL_WINDOWEVENT:
+                    b->aux_ui_dirty = true;  // refresh the cached second screen now
+                    break;
+                default: break;
+            }
         }
         if (runtime_ui_event(b->runtime_ui, e)) continue;
 #endif
@@ -2286,6 +2382,13 @@ HostWindow::Events HostWindow::pump() {
             if (SDL_GameControllerGetButton(b->controller, binding.button))
                 keys &= static_cast<uint16_t>(~(1u << binding.bit));
         }
+        // L1 + Start + Select: leave the game (handhelds have no window to
+        // close, and ROCKNIX ports are expected to exit on a button chord).
+        if (SDL_GameControllerGetButton(b->controller, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) &&
+            SDL_GameControllerGetButton(b->controller, SDL_CONTROLLER_BUTTON_START) &&
+            SDL_GameControllerGetButton(b->controller, SDL_CONTROLLER_BUTTON_BACK)) {
+            ev.quit = true;
+        }
     }
     if (b->touch_controls) {
         const uint16_t touch_buttons = active_touch_buttons(b);
@@ -2379,6 +2482,10 @@ HostWindow::Events HostWindow::pump() {
 
 }  // namespace gbarecomp
 
+extern "C" float gbarecomp_present_fps() {
+    return gbarecomp::g_present_fps.load();
+}
+
 // Lets game-side UI (e.g. a touch button on a second screen) open the
 // runtime settings menu or end the session.
 extern "C" void gbarecomp_runtime_ui_open() {
@@ -2463,5 +2570,6 @@ HostWindow::Events HostWindow::pump() {
 
 extern "C" void gbarecomp_runtime_ui_open() {}
 extern "C" void gbarecomp_request_quit() {}
+extern "C" float gbarecomp_present_fps() { return 0.0f; }
 
 #endif  // GBARECOMP_HAVE_SDL2
